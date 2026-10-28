@@ -1,0 +1,42 @@
+[package]
+name = "north-toolkit"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "north_toolkit"
+path = "src/lib.rs"
+
+[[example]]
+name = "hello_world"
+path = "examples/hello_world.rs"
+
+[dependencies]
+# Vulkan
+ash = "0.38"
+ash-window = "0.13"
+raw-window-handle = "0.6"
+
+# Wayland client
+wayland-client = { version = "0.31", features = ["dlopen"] }
+wayland-backend = { version = "0.3", features = ["client_system", "dlopen", "rwh_06"] }
+wayland-protocols = { version = "0.32", features = ["client", "unstable", "staging"] }
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+
+# Event loop
+calloop = { version = "0.14", features = ["signals"] }
+
+# Font / Text
+swash = "0.1"
+rustybuzz = "0.14"
+fontdb = "0.16"
+lru = "0.12"
+
+# Utilities
+bytemuck = { version = "1.25", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow = "1.0"
+thiserror = "2.0"
+smallvec = "1.16"
+slab = "0.4"
