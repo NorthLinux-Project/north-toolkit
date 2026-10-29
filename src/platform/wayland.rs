@@ -6,6 +6,7 @@ use raw_window_handle::{
     RawDisplayHandle, RawWindowHandle, WaylandDisplayHandle, WaylandWindowHandle,
 };
 use wayland_client::protocol::{
+    wl_callback::{self, WlCallback},
     wl_compositor::{self, WlCompositor},
     wl_keyboard::{self, WlKeyboard},
     wl_pointer::{self, WlPointer},
@@ -18,6 +19,8 @@ use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
 };
 use wayland_protocols::xdg::shell::client::{
+    xdg_popup::{self, XdgPopup},
+    xdg_positioner::{self, Anchor, ConstraintAdjustment, Gravity, XdgPositioner},
     xdg_surface::{self, XdgSurface},
     xdg_toplevel::{self, XdgToplevel},
     xdg_wm_base::{self, XdgWmBase},
@@ -35,7 +38,21 @@ use wayland_protocols::wp::viewporter::client::{
     wp_viewporter::{self, WpViewporter},
 };
 
-use crate::event::{KeyEvent, MouseButton, PointerEvent};
+use crate::event::{KeyEvent, Modifiers, MouseButton, PointerEvent};
+
+pub struct PopupSurface {
+    pub surface: WlSurface,
+    pub xdg_surface: XdgSurface,
+    pub xdg_popup: XdgPopup,
+    pub viewport: Option<WpViewport>,
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+    pub configured: bool,
+    pub is_dismissed: bool,
+    pub window_handle: RawWindowHandle,
+}
 
 pub struct WaylandState {
     pub compositor: Option<WlCompositor>,
@@ -53,6 +70,9 @@ pub struct WaylandState {
     pub surface: Option<WlSurface>,
     pub xdg_surface: Option<XdgSurface>,
     pub xdg_toplevel: Option<XdgToplevel>,
+    pub popup: Option<PopupSurface>,
+    pub pointer_surface: Option<WlSurface>,
+    pub last_seat_serial: u32,
     pub width: u32,
     pub height: u32,
     pub scale: f32,
@@ -62,12 +82,16 @@ pub struct WaylandState {
     pub key_events: Vec<KeyEvent>,
     pub resize_requested: Option<(u32, u32)>,
     pub pointer_pos: (f32, f32),
-    pub shift_held: bool,
-    pub caps_lock: bool,
+    pub frame_callback: Option<WlCallback>,
+    pub frame_ready: bool,
+    pub xkb_context: xkbcommon::xkb::Context,
+    pub xkb_keymap: Option<xkbcommon::xkb::Keymap>,
+    pub xkb_state: Option<xkbcommon::xkb::State>,
 }
 
 impl WaylandState {
     pub fn new(width: u32, height: u32) -> Self {
+        let xkb_context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
         Self {
             compositor: None,
             shm: None,
@@ -84,6 +108,9 @@ impl WaylandState {
             surface: None,
             xdg_surface: None,
             xdg_toplevel: None,
+            popup: None,
+            pointer_surface: None,
+            last_seat_serial: 0,
             width,
             height,
             scale: 1.0,
@@ -93,8 +120,11 @@ impl WaylandState {
             key_events: Vec::new(),
             resize_requested: None,
             pointer_pos: (0.0, 0.0),
-            shift_held: false,
-            caps_lock: false,
+            frame_callback: None,
+            frame_ready: true,
+            xkb_context,
+            xkb_keymap: None,
+            xkb_state: None,
         }
     }
 }
@@ -102,6 +132,7 @@ impl WaylandState {
 pub struct WaylandWindow {
     pub connection: Connection,
     pub event_queue: Option<EventQueue<WaylandState>>,
+    pub qh: QueueHandle<WaylandState>,
     pub state: WaylandState,
     pub display_handle: RawDisplayHandle,
     pub window_handle: RawWindowHandle,
@@ -174,10 +205,162 @@ impl WaylandWindow {
         Ok(Self {
             connection,
             event_queue: Some(event_queue),
+            qh,
             state,
             display_handle,
             window_handle,
         })
+    }
+
+    pub fn request_frame(&mut self) {
+        if self.state.frame_callback.is_none() {
+            if let Some(surface) = &self.state.surface {
+                let callback = surface.frame(&self.qh, ());
+                self.state.frame_callback = Some(callback);
+                self.state.frame_ready = false;
+                surface.commit();
+            }
+        }
+    }
+
+    pub fn open_popup(
+        &mut self,
+        anchor_x: i32,
+        anchor_y: i32,
+        anchor_w: u32,
+        anchor_h: u32,
+        popup_w: u32,
+        popup_h: u32,
+    ) -> Result<()> {
+        let compositor = self
+            .state
+            .compositor
+            .as_ref()
+            .context("Wayland compositor global not available")?;
+        let wm_base = self
+            .state
+            .wm_base
+            .as_ref()
+            .context("xdg_wm_base global not available")?;
+        let parent_xdg_surface = self
+            .state
+            .xdg_surface
+            .as_ref()
+            .context("Parent xdg_surface not available")?;
+
+        let surface = compositor.create_surface(&self.qh, ());
+        let xdg_surface = wm_base.get_xdg_surface(&surface, &self.qh, ());
+
+        let positioner = wm_base.create_positioner(&self.qh, ());
+        positioner.set_size(popup_w as i32, popup_h as i32);
+        positioner.set_anchor_rect(anchor_x, anchor_y, anchor_w as i32, anchor_h as i32);
+        positioner.set_anchor(Anchor::BottomLeft);
+        positioner.set_gravity(Gravity::BottomRight);
+        positioner.set_constraint_adjustment(
+            ConstraintAdjustment::SlideX
+                | ConstraintAdjustment::SlideY
+                | ConstraintAdjustment::FlipY,
+        );
+
+        let xdg_popup = xdg_surface.get_popup(Some(parent_xdg_surface), &positioner, &self.qh, ());
+
+        if let Some(seat) = &self.state.seat {
+            if self.state.last_seat_serial > 0 {
+                xdg_popup.grab(seat, self.state.last_seat_serial);
+            }
+        }
+
+        let viewport = if let Some(viewporter) = &self.state.viewporter {
+            let vp = viewporter.get_viewport(&surface, &self.qh, ());
+            vp.set_destination(popup_w as i32, popup_h as i32);
+            Some(vp)
+        } else {
+            None
+        };
+
+        surface.commit();
+
+        let surface_ptr = surface.id().as_ptr() as *mut c_void;
+        let surf_ptr = NonNull::new(surface_ptr).context("Null popup surface ptr")?;
+        let window_handle = RawWindowHandle::Wayland(WaylandWindowHandle::new(surf_ptr));
+
+        self.state.popup = Some(PopupSurface {
+            surface,
+            xdg_surface,
+            xdg_popup,
+            viewport,
+            x: 0,
+            y: 0,
+            width: popup_w,
+            height: popup_h,
+            configured: false,
+            is_dismissed: false,
+            window_handle,
+        });
+
+        positioner.destroy();
+        Ok(())
+    }
+
+    pub fn dismiss_popup(&mut self) {
+        if let Some(popup) = self.state.popup.take() {
+            popup.xdg_popup.destroy();
+            popup.xdg_surface.destroy();
+            if let Some(vp) = popup.viewport {
+                vp.destroy();
+            }
+            popup.surface.destroy();
+        }
+    }
+
+    pub fn is_pointer_on_popup(&self) -> bool {
+        if let Some(popup) = &self.state.popup {
+            self.state.pointer_surface.as_ref() == Some(&popup.surface)
+        } else {
+            false
+        }
+    }
+}
+
+impl Dispatch<XdgPositioner, ()> for WaylandState {
+    fn event(
+        _: &mut Self,
+        _: &XdgPositioner,
+        _: xdg_positioner::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {}
+}
+
+impl Dispatch<XdgPopup, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &XdgPopup,
+        event: xdg_popup::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            xdg_popup::Event::Configure { x, y, width, height } => {
+                if let Some(popup) = &mut state.popup {
+                    popup.x = x;
+                    popup.y = y;
+                    if width > 0 && height > 0 {
+                        popup.width = width as u32;
+                        popup.height = height as u32;
+                    }
+                    popup.configured = true;
+                }
+            }
+            xdg_popup::Event::PopupDone => {
+                if let Some(popup) = &mut state.popup {
+                    popup.is_dismissed = true;
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -250,6 +433,13 @@ impl Dispatch<XdgSurface, ()> for WaylandState {
     ) {
         if let xdg_surface::Event::Configure { serial } = event {
             xdg_surface.ack_configure(serial);
+            if let Some(popup) = &mut state.popup {
+                if &popup.xdg_surface == xdg_surface {
+                    popup.configured = true;
+                    popup.surface.commit();
+                    return;
+                }
+            }
             state.configured = true;
             if let Some(surf) = &state.surface {
                 surf.commit();
@@ -321,14 +511,22 @@ impl Dispatch<WlPointer, ()> for WaylandState {
     ) {
         match event {
             wl_pointer::Event::Enter {
+                serial,
+                surface,
                 surface_x,
                 surface_y,
-                ..
             } => {
                 let px = surface_x as f32;
                 let py = surface_y as f32;
+                state.last_seat_serial = serial;
+                state.pointer_surface = Some(surface);
                 state.pointer_pos = (px, py);
                 state.pointer_events.push(PointerEvent::Move { x: px, y: py });
+            }
+            wl_pointer::Event::Leave { surface, .. } => {
+                if state.pointer_surface.as_ref() == Some(&surface) {
+                    state.pointer_surface = None;
+                }
             }
             wl_pointer::Event::Motion {
                 surface_x,
@@ -341,10 +539,12 @@ impl Dispatch<WlPointer, ()> for WaylandState {
                 state.pointer_events.push(PointerEvent::Move { x: px, y: py });
             }
             wl_pointer::Event::Button {
+                serial,
                 button,
                 state: btn_state,
                 ..
             } => {
+                state.last_seat_serial = serial;
                 let mb = match button {
                     272 => MouseButton::Left,
                     273 => MouseButton::Right,
@@ -391,112 +591,133 @@ impl Dispatch<WlKeyboard, ()> for WaylandState {
         _: &QueueHandle<Self>,
     ) {
         match event {
+            wl_keyboard::Event::Keymap { format, fd, size } => {
+                if format == wayland_client::WEnum::Value(wl_keyboard::KeymapFormat::XkbV1) {
+                    use std::fs::File;
+                    use std::io::Read;
+                    let mut file = File::from(fd);
+                    let mut buf = vec![0u8; size as usize];
+                    if file.read_exact(&mut buf).is_ok() {
+                        if let Some(pos) = buf.iter().position(|&b| b == 0) {
+                            buf.truncate(pos);
+                        }
+                        if let Ok(keymap_str) = String::from_utf8(buf) {
+                            if let Some(keymap) = xkbcommon::xkb::Keymap::new_from_string(
+                                &state.xkb_context,
+                                keymap_str,
+                                xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1,
+                                xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
+                            ) {
+                                let xkb_state = xkbcommon::xkb::State::new(&keymap);
+                                state.xkb_keymap = Some(keymap);
+                                state.xkb_state = Some(xkb_state);
+                            }
+                        }
+                    }
+                }
+            }
             wl_keyboard::Event::Modifiers {
                 mods_depressed,
+                mods_latched,
                 mods_locked,
+                group,
                 ..
             } => {
-                state.shift_held = (mods_depressed & 1) != 0;
-                state.caps_lock = (mods_locked & 2) != 0;
+                if let Some(xkb_state) = &mut state.xkb_state {
+                    xkb_state.update_mask(
+                        mods_depressed,
+                        mods_latched,
+                        mods_locked,
+                        0,
+                        0,
+                        group,
+                    );
+                }
             }
             wl_keyboard::Event::Key {
+                serial,
                 key,
                 state: key_state,
                 ..
             } => {
+                state.last_seat_serial = serial;
                 let is_pressed =
                     key_state == wayland_client::WEnum::Value(wl_keyboard::KeyState::Pressed);
-                if key == 42 || key == 54 {
-                    state.shift_held = is_pressed;
-                }
-                if key == 58 && is_pressed {
-                    state.caps_lock = !state.caps_lock;
-                }
+                let xkb_keycode = xkbcommon::xkb::Keycode::new(key + 8);
 
-                let shift = state.shift_held;
-                let uppercase = shift ^ state.caps_lock;
-
-                let (key_str, text_char) = match key {
-                    14 => ("Backspace".to_string(), None),
-                    28 => ("Return".to_string(), Some("\n".to_string())),
-                    57 => ("Space".to_string(), Some(" ".to_string())),
-                    105 => ("Left".to_string(), None),
-                    106 => ("Right".to_string(), None),
-                    103 => ("Up".to_string(), None),
-                    108 => ("Down".to_string(), None),
-                    102 => ("Home".to_string(), None),
-                    107 => ("End".to_string(), None),
-                    111 => ("Delete".to_string(), None),
-                    15 => ("Tab".to_string(), Some("\t".to_string())),
-
-                    // Digits row
-                    41 => if shift { ("~".to_string(), Some("~".to_string())) } else { ("`".to_string(), Some("`".to_string())) },
-                    2 => if shift { ("!".to_string(), Some("!".to_string())) } else { ("1".to_string(), Some("1".to_string())) },
-                    3 => if shift { ("@".to_string(), Some("@".to_string())) } else { ("2".to_string(), Some("2".to_string())) },
-                    4 => if shift { ("#".to_string(), Some("#".to_string())) } else { ("3".to_string(), Some("3".to_string())) },
-                    5 => if shift { ("$".to_string(), Some("$".to_string())) } else { ("4".to_string(), Some("4".to_string())) },
-                    6 => if shift { ("%".to_string(), Some("%".to_string())) } else { ("5".to_string(), Some("5".to_string())) },
-                    7 => if shift { ("^".to_string(), Some("^".to_string())) } else { ("6".to_string(), Some("6".to_string())) },
-                    8 => if shift { ("&".to_string(), Some("&".to_string())) } else { ("7".to_string(), Some("7".to_string())) },
-                    9 => if shift { ("*".to_string(), Some("*".to_string())) } else { ("8".to_string(), Some("8".to_string())) },
-                    10 => if shift { ("(".to_string(), Some("(".to_string())) } else { ("9".to_string(), Some("9".to_string())) },
-                    11 => if shift { (")".to_string(), Some(")".to_string())) } else { ("0".to_string(), Some("0".to_string())) },
-                    12 => if shift { ("_".to_string(), Some("_".to_string())) } else { ("-".to_string(), Some("-".to_string())) },
-                    13 => if shift { ("+".to_string(), Some("+".to_string())) } else { ("=".to_string(), Some("=".to_string())) },
-
-                    // Letters row 1
-                    16 => if uppercase { ("Q".to_string(), Some("Q".to_string())) } else { ("q".to_string(), Some("q".to_string())) },
-                    17 => if uppercase { ("W".to_string(), Some("W".to_string())) } else { ("w".to_string(), Some("w".to_string())) },
-                    18 => if uppercase { ("E".to_string(), Some("E".to_string())) } else { ("e".to_string(), Some("e".to_string())) },
-                    19 => if uppercase { ("R".to_string(), Some("R".to_string())) } else { ("r".to_string(), Some("r".to_string())) },
-                    20 => if uppercase { ("T".to_string(), Some("T".to_string())) } else { ("t".to_string(), Some("t".to_string())) },
-                    21 => if uppercase { ("Y".to_string(), Some("Y".to_string())) } else { ("y".to_string(), Some("y".to_string())) },
-                    22 => if uppercase { ("U".to_string(), Some("U".to_string())) } else { ("u".to_string(), Some("u".to_string())) },
-                    23 => if uppercase { ("I".to_string(), Some("I".to_string())) } else { ("i".to_string(), Some("i".to_string())) },
-                    24 => if uppercase { ("O".to_string(), Some("O".to_string())) } else { ("o".to_string(), Some("o".to_string())) },
-                    25 => if uppercase { ("P".to_string(), Some("P".to_string())) } else { ("p".to_string(), Some("p".to_string())) },
-                    26 => if shift { ("{".to_string(), Some("{".to_string())) } else { ("[".to_string(), Some("[".to_string())) },
-                    27 => if shift { ("}".to_string(), Some("}".to_string())) } else { ("]".to_string(), Some("]".to_string())) },
-                    43 => if shift { ("|".to_string(), Some("|".to_string())) } else { ("\\".to_string(), Some("\\".to_string())) },
-
-                    // Letters row 2
-                    30 => if uppercase { ("A".to_string(), Some("A".to_string())) } else { ("a".to_string(), Some("a".to_string())) },
-                    31 => if uppercase { ("S".to_string(), Some("S".to_string())) } else { ("s".to_string(), Some("s".to_string())) },
-                    32 => if uppercase { ("D".to_string(), Some("D".to_string())) } else { ("d".to_string(), Some("d".to_string())) },
-                    33 => if uppercase { ("F".to_string(), Some("F".to_string())) } else { ("f".to_string(), Some("f".to_string())) },
-                    34 => if uppercase { ("G".to_string(), Some("G".to_string())) } else { ("g".to_string(), Some("g".to_string())) },
-                    35 => if uppercase { ("H".to_string(), Some("H".to_string())) } else { ("h".to_string(), Some("h".to_string())) },
-                    36 => if uppercase { ("J".to_string(), Some("J".to_string())) } else { ("j".to_string(), Some("j".to_string())) },
-                    37 => if uppercase { ("K".to_string(), Some("K".to_string())) } else { ("k".to_string(), Some("k".to_string())) },
-                    38 => if uppercase { ("L".to_string(), Some("L".to_string())) } else { ("l".to_string(), Some("l".to_string())) },
-                    39 => if shift { (":".to_string(), Some(":".to_string())) } else { (";".to_string(), Some(";".to_string())) },
-                    40 => if shift { ("\"".to_string(), Some("\"".to_string())) } else { ("'".to_string(), Some("'".to_string())) },
-
-                    // Letters row 3
-                    44 => if uppercase { ("Z".to_string(), Some("Z".to_string())) } else { ("z".to_string(), Some("z".to_string())) },
-                    45 => if uppercase { ("X".to_string(), Some("X".to_string())) } else { ("x".to_string(), Some("x".to_string())) },
-                    46 => if uppercase { ("C".to_string(), Some("C".to_string())) } else { ("c".to_string(), Some("c".to_string())) },
-                    47 => if uppercase { ("V".to_string(), Some("V".to_string())) } else { ("v".to_string(), Some("v".to_string())) },
-                    48 => if uppercase { ("B".to_string(), Some("B".to_string())) } else { ("b".to_string(), Some("b".to_string())) },
-                    49 => if uppercase { ("N".to_string(), Some("N".to_string())) } else { ("n".to_string(), Some("n".to_string())) },
-                    50 => if uppercase { ("M".to_string(), Some("M".to_string())) } else { ("m".to_string(), Some("m".to_string())) },
-                    51 => if shift { ("<".to_string(), Some("<".to_string())) } else { (",".to_string(), Some(",".to_string())) },
-                    52 => if shift { (">".to_string(), Some(">".to_string())) } else { (".".to_string(), Some(".".to_string())) },
-                    53 => if shift { ("?".to_string(), Some("?".to_string())) } else { ("/".to_string(), Some("/".to_string())) },
-
-                    _ => (format!("Key{}", key), None),
+                let (keysym, key_str, text_char, modifiers) = if let Some(xkb_state) = &state.xkb_state {
+                    let sym = xkb_state.key_get_one_sym(xkb_keycode);
+                    let name = xkbcommon::xkb::keysym_get_name(sym);
+                    let utf8 = xkb_state.key_get_utf8(xkb_keycode);
+                    let text = if !utf8.is_empty() && is_pressed {
+                        let first = utf8.chars().next().unwrap();
+                        if first >= ' ' || first == '\t' || first == '\n' {
+                            Some(utf8)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    let mods = Modifiers {
+                        shift: xkb_state.mod_name_is_active(
+                            xkbcommon::xkb::MOD_NAME_SHIFT,
+                            xkbcommon::xkb::STATE_MODS_EFFECTIVE,
+                        ),
+                        ctrl: xkb_state.mod_name_is_active(
+                            xkbcommon::xkb::MOD_NAME_CTRL,
+                            xkbcommon::xkb::STATE_MODS_EFFECTIVE,
+                        ),
+                        alt: xkb_state.mod_name_is_active(
+                            xkbcommon::xkb::MOD_NAME_ALT,
+                            xkbcommon::xkb::STATE_MODS_EFFECTIVE,
+                        ),
+                        logo: xkb_state.mod_name_is_active(
+                            xkbcommon::xkb::MOD_NAME_LOGO,
+                            xkbcommon::xkb::STATE_MODS_EFFECTIVE,
+                        ),
+                    };
+                    (sym.raw(), name, text, mods)
+                } else {
+                    (0, format!("Key{}", key), None, Modifiers::default())
                 };
 
                 if is_pressed {
                     state.key_events.push(KeyEvent::KeyDown {
                         key: key_str,
+                        keysym,
                         text: text_char,
+                        modifiers,
                     });
                 } else {
-                    state.key_events.push(KeyEvent::KeyUp { key: key_str });
+                    state.key_events.push(KeyEvent::KeyUp {
+                        key: key_str,
+                        keysym,
+                        modifiers,
+                    });
                 }
             }
             _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlCallback, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        callback: &WlCallback,
+        event: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let wl_callback::Event::Done { .. } = event {
+            state.frame_ready = true;
+            if let Some(current) = &state.frame_callback {
+                if current.id() == callback.id() {
+                    state.frame_callback = None;
+                }
+            }
         }
     }
 }
@@ -613,5 +834,28 @@ impl Dispatch<WpViewport, ()> for WaylandState {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_xkb_keymap_nul_terminator_handling() {
+        let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
+        let raw_xkb = b"xkb_keymap { xkb_keycodes { minimum = 8; maximum = 255; }; xkb_types { type \"ONE_LEVEL\" { modifiers = none; map[none] = Level1; level_name[Level1] = \"Any\"; }; }; xkb_compatibility { }; xkb_symbols { }; };\0";
+
+        let mut buf = raw_xkb.to_vec();
+        if let Some(pos) = buf.iter().position(|&b| b == 0) {
+            buf.truncate(pos);
+        }
+
+        let keymap_str = String::from_utf8(buf).expect("Valid UTF-8 keymap");
+        let keymap = xkbcommon::xkb::Keymap::new_from_string(
+            &context,
+            keymap_str,
+            xkbcommon::xkb::KEYMAP_FORMAT_TEXT_V1,
+            xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
+        );
+        assert!(keymap.is_some());
     }
 }

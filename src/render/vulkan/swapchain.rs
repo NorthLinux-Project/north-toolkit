@@ -35,12 +35,12 @@ impl VulkanSwapchain {
             .iter()
             .cloned()
             .find(|f| {
-                (f.format == vk::Format::B8G8R8A8_UNORM || f.format == vk::Format::R8G8B8A8_UNORM)
+                (f.format == vk::Format::B8G8R8A8_SRGB || f.format == vk::Format::R8G8B8A8_SRGB)
                     && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
             })
             .or_else(|| {
                 formats.iter().cloned().find(|f| {
-                    (f.format == vk::Format::B8G8R8A8_SRGB || f.format == vk::Format::R8G8B8A8_SRGB)
+                    (f.format == vk::Format::B8G8R8A8_UNORM || f.format == vk::Format::R8G8B8A8_UNORM)
                         && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
                 })
             })

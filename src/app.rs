@@ -4,10 +4,10 @@ use anyhow::{Context, Result};
 use ash::khr::surface;
 use ash::vk;
 use calloop::EventLoop;
-use tracing::info;
+use tracing::{info, warn};
 
-use crate::event::EventDispatcher;
-use crate::layout::LayoutEngine;
+use crate::event::{EventDispatcher, PointerEvent};
+use crate::layout::{LayoutEngine, LayoutRect};
 use crate::platform::WaylandWindow;
 use crate::render::{
     FrameRenderer, GlyphAtlas, GlyphPipeline, QuadPipeline, VulkanContext, VulkanSwapchain,
@@ -15,7 +15,28 @@ use crate::render::{
 };
 use crate::text::{GlyphRasterizer, TextShaper};
 use crate::theme::Theme;
-use crate::widget::WidgetTree;
+use crate::widget::{PopupMenu, Widget, WidgetId, WidgetTree};
+
+pub struct ActivePopupSession {
+    pub source_widget: WidgetId,
+    pub menu: PopupMenu,
+    pub surface: vk::SurfaceKHR,
+    pub swapchain: VulkanSwapchain,
+    pub width: u32,
+    pub height: u32,
+    pub image_available: vk::Semaphore,
+}
+
+impl ActivePopupSession {
+    pub fn destroy(self, context: &VulkanContext, surface_loader: &surface::Instance) {
+        unsafe {
+            context.device.device_wait_idle().ok();
+            context.device.destroy_semaphore(self.image_available, None);
+            self.swapchain.destroy(&context.device);
+            surface_loader.destroy_surface(self.surface, None);
+        }
+    }
+}
 
 pub struct Application {
     pub window: WaylandWindow,
@@ -34,6 +55,7 @@ pub struct Application {
     pub layout_engine: LayoutEngine,
     pub event_dispatcher: EventDispatcher,
     pub theme: Theme,
+    pub active_popup: Option<ActivePopupSession>,
 }
 
 impl Application {
@@ -126,6 +148,7 @@ impl Application {
             layout_engine,
             event_dispatcher,
             theme,
+            active_popup: None,
         })
     }
 
@@ -134,14 +157,21 @@ impl Application {
             EventLoop::try_new().context("Failed to create Calloop event loop")?;
 
         let backend = self.window.connection.backend();
-        let owned_fd = backend.poll_fd().try_clone_to_owned().context("Failed to duplicate Wayland poll FD")?;
+        let owned_fd = backend
+            .poll_fd()
+            .try_clone_to_owned()
+            .context("Failed to duplicate Wayland poll FD")?;
         let loop_handle = event_loop.handle();
-        loop_handle.insert_source(
-            calloop::generic::Generic::new(owned_fd, calloop::Interest::READ, calloop::Mode::Level),
-            |_event, _metadata, _state| {
-                Ok(calloop::PostAction::Continue)
-            },
-        ).context("Failed to register Wayland connection FD into Calloop")?;
+        loop_handle
+            .insert_source(
+                calloop::generic::Generic::new(
+                    owned_fd,
+                    calloop::Interest::READ,
+                    calloop::Mode::Level,
+                ),
+                |_event, _metadata, _state| Ok(calloop::PostAction::Continue),
+            )
+            .context("Failed to register Wayland connection FD into Calloop")?;
 
         let mut last_frame = Instant::now();
 
@@ -152,7 +182,18 @@ impl Application {
             let delta_ms = (now - last_frame).as_secs_f32() * 1000.0;
             last_frame = now;
 
-            event_loop.dispatch(Some(Duration::from_millis(16)), &mut self.window.state)?;
+            let anim_dirty = tree.tick_animations(delta_ms);
+            let is_dirty = tree.is_dirty() || anim_dirty || self.active_popup.is_some();
+
+            let timeout = if anim_dirty {
+                Some(Duration::from_millis(8))
+            } else if is_dirty && !self.window.state.frame_ready {
+                Some(Duration::from_millis(4))
+            } else {
+                Some(Duration::from_millis(50))
+            };
+
+            event_loop.dispatch(timeout, &mut self.window.state)?;
 
             if let Some(ref mut eq) = self.window.event_queue {
                 while let Some(guard) = eq.prepare_read() {
@@ -170,9 +211,59 @@ impl Application {
                 self.window.connection.flush()?;
             }
 
+            if let Some(popup) = &self.active_popup {
+                let dismissed = self
+                    .window
+                    .state
+                    .popup
+                    .as_ref()
+                    .map(|p| p.is_dismissed)
+                    .unwrap_or(true);
+                if dismissed {
+                    let source = popup.source_widget;
+                    let selected = popup.menu.selected_index;
+                    let active = self.active_popup.take().unwrap();
+                    active.destroy(&self.context, &self.surface_loader);
+                    self.window.dismiss_popup();
+                    tree.notify_popup_closed(source, selected);
+                    tree.dirty = true;
+                    self.window.request_frame();
+                }
+            }
+
             let mut pointer_events = Vec::new();
             std::mem::swap(&mut pointer_events, &mut self.window.state.pointer_events);
             for evt in &pointer_events {
+                if let Some(popup) = &mut self.active_popup {
+                    if self.window.is_pointer_on_popup() {
+                        let popup_rect =
+                            LayoutRect::new(0.0, 0.0, popup.width as f32, popup.height as f32);
+                        let resp = popup.menu.on_pointer_event(evt, popup_rect);
+                        if resp == crate::event::EventResponse::Handled {
+                            self.window.request_frame();
+                        }
+                        if popup.menu.is_dismissed {
+                            let source = popup.source_widget;
+                            let selected = popup.menu.selected_index;
+                            let active = self.active_popup.take().unwrap();
+                            active.destroy(&self.context, &self.surface_loader);
+                            self.window.dismiss_popup();
+                            tree.notify_popup_closed(source, selected);
+                            tree.dirty = true;
+                            self.window.request_frame();
+                        }
+                        continue;
+                    } else if let PointerEvent::Down { .. } = evt {
+                        let source = popup.source_widget;
+                        let active = self.active_popup.take().unwrap();
+                        active.destroy(&self.context, &self.surface_loader);
+                        self.window.dismiss_popup();
+                        tree.notify_popup_closed(source, None);
+                        tree.dirty = true;
+                        self.window.request_frame();
+                    }
+                }
+
                 let resp = tree.dispatch_pointer_event(
                     &mut self.event_dispatcher,
                     &self.layout_engine,
@@ -186,15 +277,117 @@ impl Application {
             let mut key_events = Vec::new();
             std::mem::swap(&mut key_events, &mut self.window.state.key_events);
             for evt in &key_events {
-                let resp = tree.dispatch_key_event(&self.event_dispatcher, evt);
+                if let Some(popup) = &mut self.active_popup {
+                    let resp = popup.menu.on_key_event(evt);
+                    if resp == crate::event::EventResponse::Handled {
+                        self.window.request_frame();
+                    }
+                    if popup.menu.is_dismissed {
+                        let source = popup.source_widget;
+                        let selected = popup.menu.selected_index;
+                        let active = self.active_popup.take().unwrap();
+                        active.destroy(&self.context, &self.surface_loader);
+                        self.window.dismiss_popup();
+                        tree.notify_popup_closed(source, selected);
+                        tree.dirty = true;
+                        self.window.request_frame();
+                    }
+                    continue;
+                }
+
+                let resp = tree.dispatch_key_event(&mut self.event_dispatcher, evt);
                 if resp == crate::event::EventResponse::Handled {
                     tree.dirty = true;
                 }
             }
 
-            let anim_dirty = tree.tick_animations(delta_ms);
+            if self.active_popup.is_none() {
+                if let Some(req) = tree.take_pending_popup_request(&self.layout_engine) {
+                    let measure_func = req.menu.measure(&self.shaper);
+                    let (popup_w, popup_h) = if let Some(m) = measure_func {
+                        m(Some(f32::INFINITY), Some(f32::INFINITY))
+                    } else {
+                        (180.0, req.menu.total_height())
+                    };
+
+                    let scale = self.window.state.scale;
+                    let w_u32 = popup_w.ceil() as u32;
+                    let h_u32 = popup_h.ceil() as u32;
+
+                    let res = self.window.open_popup(
+                        req.anchor_rect.x.round() as i32,
+                        req.anchor_rect.y.round() as i32,
+                        req.anchor_rect.width.round() as u32,
+                        req.anchor_rect.height.round() as u32,
+                        w_u32,
+                        h_u32,
+                    );
+
+                    if res.is_ok() {
+                        if let Some(ref mut eq) = self.window.event_queue {
+                            eq.roundtrip(&mut self.window.state).ok();
+                        }
+
+                        if let Some(popup_surface) = self.window.state.popup.as_ref() {
+                            let phys_w = ((w_u32 as f32) * scale).round() as u32;
+                            let phys_h = ((h_u32 as f32) * scale).round() as u32;
+
+                            // SAFETY: raw handles provided from WaylandWindow must be valid
+                            let vk_surface = unsafe {
+                                ash_window::create_surface(
+                                    &self.context.entry,
+                                    &self.context.instance,
+                                    self.window.display_handle,
+                                    popup_surface.window_handle,
+                                    None,
+                                )
+                            };
+
+                            if let Ok(surf) = vk_surface {
+                                let swapchain_res = VulkanSwapchain::new(
+                                    &self.context,
+                                    &self.surface_loader,
+                                    surf,
+                                    phys_w.max(1),
+                                    phys_h.max(1),
+                                );
+
+                                match swapchain_res {
+                                    Ok(swapchain) => {
+                                        let sem_info = vk::SemaphoreCreateInfo::default();
+                                        // SAFETY: valid logical device handle
+                                        let image_available = unsafe {
+                                            self.context.device.create_semaphore(&sem_info, None)?
+                                        };
+                                        self.active_popup = Some(ActivePopupSession {
+                                            source_widget: req.source_widget,
+                                            menu: req.menu,
+                                            surface: surf,
+                                            swapchain,
+                                            width: w_u32,
+                                            height: h_u32,
+                                            image_available,
+                                        });
+                                        tree.dirty = true;
+                                        self.window.request_frame();
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to create swapchain for popup: {:?}", e);
+                                        // SAFETY: clean up orphan surface handle on swapchain creation failure
+                                        unsafe {
+                                            self.surface_loader.destroy_surface(surf, None);
+                                        }
+                                        self.window.dismiss_popup();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
 
             if let Some((new_w, new_h)) = self.window.state.resize_requested.take() {
+                // SAFETY: wait for device idle before swapchain recreation
                 unsafe {
                     self.context.device.device_wait_idle()?;
                 }
@@ -215,7 +408,10 @@ impl Application {
                 tree.dirty = true;
             }
 
-            if tree.is_dirty() || anim_dirty {
+            let has_popup = self.active_popup.is_some();
+            if (tree.is_dirty() || anim_dirty || has_popup) && self.window.state.frame_ready {
+                self.window.request_frame();
+
                 tree.sync_layout(&mut self.layout_engine, &self.shaper);
                 if let Some(root) = tree.root() {
                     let root_layout = tree.nodes[root.0].as_ref().unwrap().layout_node;
@@ -252,6 +448,42 @@ impl Application {
                     self.window.state.scale,
                 );
 
+                let (popup_target, popup_idx) = if let Some(popup) = &self.active_popup {
+                    match popup.swapchain.acquire_next_image(popup.image_available) {
+                        Ok((idx, _)) => {
+                            let p_img = popup.swapchain.images[idx as usize];
+                            let p_view = popup.swapchain.image_views[idx as usize];
+                            let p_extent = popup.swapchain.extent;
+                            let p_rect =
+                                LayoutRect::new(0.0, 0.0, popup.width as f32, popup.height as f32);
+                            let p_prims = popup.menu.paint(
+                                p_rect,
+                                &self.theme,
+                                &mut self.atlas,
+                                &self.rasterizer,
+                                &self.shaper,
+                                self.window.state.scale,
+                            );
+                            (
+                                Some((
+                                    p_img,
+                                    p_view,
+                                    p_extent,
+                                    self.theme.colors.surface,
+                                    p_prims,
+                                )),
+                                Some(idx),
+                            )
+                        }
+                        Err(e) => {
+                            warn!("Failed to acquire popup swapchain image: {:?}", e);
+                            (None, None)
+                        }
+                    }
+                } else {
+                    (None, None)
+                };
+
                 if self.atlas.is_dirty() {
                     let (atlas_w, atlas_h) = self.atlas.dimensions();
                     while self.atlas_textures.len() < self.atlas.page_count() {
@@ -277,6 +509,10 @@ impl Application {
                     }
                 }
 
+                let popup_arg = popup_target.as_ref().map(|(img, view, ext, clr, prims)| {
+                    (*img, *view, *ext, *clr, prims.as_slice())
+                });
+
                 let cmd = self.frame_renderer.record_render_commands(
                     &self.context,
                     target_image,
@@ -284,12 +520,18 @@ impl Application {
                     self.swapchain.extent,
                     self.theme.colors.background,
                     &primitives,
+                    popup_arg,
                     &self.quad_pipeline,
                     &self.glyph_pipeline,
                 )?;
 
-                let wait_semaphores = [image_available];
-                let wait_stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+                let mut wait_semaphores = vec![image_available];
+                let mut wait_stages = vec![vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
+                if let (Some(popup), Some(_)) = (&self.active_popup, popup_idx) {
+                    wait_semaphores.push(popup.image_available);
+                    wait_stages.push(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT);
+                }
+
                 let signal_semaphores = [render_finished];
                 let command_buffers = [cmd];
 
@@ -299,6 +541,7 @@ impl Application {
                     .command_buffers(&command_buffers)
                     .signal_semaphores(&signal_semaphores);
 
+                // SAFETY: valid command buffers and semaphores submitted to graphics queue
                 unsafe {
                     self.context.device.queue_submit(
                         self.context.graphics_queue,
@@ -307,13 +550,19 @@ impl Application {
                     )?;
                 }
 
-                let swapchains = [self.swapchain.swapchain];
-                let image_indices = [image_index];
+                let mut swapchains = vec![self.swapchain.swapchain];
+                let mut image_indices = vec![image_index];
+                if let (Some(popup), Some(idx)) = (&self.active_popup, popup_idx) {
+                    swapchains.push(popup.swapchain.swapchain);
+                    image_indices.push(idx);
+                }
+
                 let present_info = vk::PresentInfoKHR::default()
                     .wait_semaphores(&signal_semaphores)
                     .swapchains(&swapchains)
                     .image_indices(&image_indices);
 
+                // SAFETY: presentation of valid swapchain images onto graphics queue
                 unsafe {
                     self.swapchain
                         .swapchain_loader
@@ -331,8 +580,12 @@ impl Application {
 
 impl Drop for Application {
     fn drop(&mut self) {
+        // SAFETY: Wait for GPU idle before destroying pipelines, descriptor pools, command pools, and swapchains
         unsafe {
             self.context.device.device_wait_idle().ok();
+            if let Some(popup) = self.active_popup.take() {
+                popup.destroy(&self.context, &self.surface_loader);
+            }
             self.frame_renderer.destroy(&self.context.device);
             self.quad_pipeline.destroy(&self.context.device);
             self.glyph_pipeline.destroy(&self.context.device);

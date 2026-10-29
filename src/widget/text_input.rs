@@ -104,81 +104,75 @@ impl Widget for TextInput {
         EventResponse::Ignored
     }
 
+    fn is_focusable(&self) -> bool {
+        true
+    }
+
     fn on_key_event(&mut self, event: &KeyEvent) -> EventResponse {
         if !self.is_focused {
             return EventResponse::Ignored;
         }
 
         match event {
-            KeyEvent::KeyDown { key, text } => {
+            KeyEvent::KeyDown { key, keysym, text, .. } => {
                 let current = self.text.get().clone();
-                match key.as_str() {
-                    "Backspace" => {
-                        if self.cursor_pos > 0 && !current.is_empty() {
-                            let mut chars: Vec<char> = current.chars().collect();
-                            if self.cursor_pos <= chars.len() {
-                                chars.remove(self.cursor_pos - 1);
-                                self.cursor_pos -= 1;
-                                self.text.set(chars.into_iter().collect());
-                                self.cursor_visible = true;
-                                self.cursor_timer_ms = 0.0;
-                                return EventResponse::Handled;
-                            }
-                        }
-                    }
-                    "Delete" => {
+                if key == "Backspace" || *keysym == 0xff08 {
+                    if self.cursor_pos > 0 && !current.is_empty() {
                         let mut chars: Vec<char> = current.chars().collect();
-                        if self.cursor_pos < chars.len() {
-                            chars.remove(self.cursor_pos);
-                            self.text.set(chars.into_iter().collect());
-                            self.cursor_visible = true;
-                            self.cursor_timer_ms = 0.0;
-                            return EventResponse::Handled;
-                        }
-                    }
-                    "Home" => {
-                        self.cursor_pos = 0;
-                        self.cursor_visible = true;
-                        self.cursor_timer_ms = 0.0;
-                        return EventResponse::Handled;
-                    }
-                    "End" => {
-                        self.cursor_pos = current.chars().count();
-                        self.cursor_visible = true;
-                        self.cursor_timer_ms = 0.0;
-                        return EventResponse::Handled;
-                    }
-                    "Left" => {
-                        if self.cursor_pos > 0 {
+                        if self.cursor_pos <= chars.len() {
+                            chars.remove(self.cursor_pos - 1);
                             self.cursor_pos -= 1;
-                            self.cursor_visible = true;
-                            self.cursor_timer_ms = 0.0;
-                            return EventResponse::Handled;
-                        }
-                    }
-                    "Right" => {
-                        if self.cursor_pos < current.chars().count() {
-                            self.cursor_pos += 1;
-                            self.cursor_visible = true;
-                            self.cursor_timer_ms = 0.0;
-                            return EventResponse::Handled;
-                        }
-                    }
-                    _ => {
-                        if let Some(t) = text {
-                            let mut chars: Vec<char> = current.chars().collect();
-                            for c in t.chars() {
-                                if !c.is_control() {
-                                    chars.insert(self.cursor_pos, c);
-                                    self.cursor_pos += 1;
-                                }
-                            }
                             self.text.set(chars.into_iter().collect());
                             self.cursor_visible = true;
                             self.cursor_timer_ms = 0.0;
                             return EventResponse::Handled;
                         }
                     }
+                } else if key == "Delete" || *keysym == 0xffff {
+                    let mut chars: Vec<char> = current.chars().collect();
+                    if self.cursor_pos < chars.len() {
+                        chars.remove(self.cursor_pos);
+                        self.text.set(chars.into_iter().collect());
+                        self.cursor_visible = true;
+                        self.cursor_timer_ms = 0.0;
+                        return EventResponse::Handled;
+                    }
+                } else if key == "Home" || *keysym == 0xff50 {
+                    self.cursor_pos = 0;
+                    self.cursor_visible = true;
+                    self.cursor_timer_ms = 0.0;
+                    return EventResponse::Handled;
+                } else if key == "End" || *keysym == 0xff57 {
+                    self.cursor_pos = current.chars().count();
+                    self.cursor_visible = true;
+                    self.cursor_timer_ms = 0.0;
+                    return EventResponse::Handled;
+                } else if key == "Left" || *keysym == 0xff51 {
+                    if self.cursor_pos > 0 {
+                        self.cursor_pos -= 1;
+                        self.cursor_visible = true;
+                        self.cursor_timer_ms = 0.0;
+                        return EventResponse::Handled;
+                    }
+                } else if key == "Right" || *keysym == 0xff53 {
+                    if self.cursor_pos < current.chars().count() {
+                        self.cursor_pos += 1;
+                        self.cursor_visible = true;
+                        self.cursor_timer_ms = 0.0;
+                        return EventResponse::Handled;
+                    }
+                } else if let Some(t) = text {
+                    let mut chars: Vec<char> = current.chars().collect();
+                    for c in t.chars() {
+                        if !c.is_control() {
+                            chars.insert(self.cursor_pos, c);
+                            self.cursor_pos += 1;
+                        }
+                    }
+                    self.text.set(chars.into_iter().collect());
+                    self.cursor_visible = true;
+                    self.cursor_timer_ms = 0.0;
+                    return EventResponse::Handled;
                 }
             }
             _ => {}
@@ -233,43 +227,26 @@ impl Widget for TextInput {
         let text_logical_x = rect.x + self.style.padding.left;
         let text_logical_baseline = rect.y + (rect.height - shaped.height) / 2.0 + shaped.ascent;
 
-        let physical_font_size = (self.font_size * scale).round();
-        let baseline_y = (text_logical_baseline * scale).round();
-
         let mut cursor_screen_x = text_logical_x * scale;
-
-        for (i, glyph) in shaped.glyphs.iter().enumerate() {
-            if !is_empty && i == self.cursor_pos {
-                cursor_screen_x = (text_logical_x + glyph.x) * scale;
-            }
-
-            let px_x = (text_logical_x + glyph.x) * scale;
-            let subpx = (px_x * 4.0).round() as i32;
-            let aligned_x = (subpx >> 2) as f32;
-            let bucket = (subpx & 3) as u8;
-
-            if let Ok(Some(region)) = atlas.get_or_insert(
-                rasterizer,
-                glyph.face_id,
-                glyph.glyph_id,
-                physical_font_size,
-                bucket,
-            ) {
-                let gx = aligned_x + region.offset_x;
-                let gy = baseline_y + region.offset_y;
-
-                prims.push(RenderPrimitive::glyph(
-                    region.page,
-                    [gx, gy, region.width as f32, region.height as f32],
-                    region.uv_rect,
-                    text_color,
-                ));
+        if !is_empty {
+            if self.cursor_pos < shaped.glyphs.len() {
+                cursor_screen_x = (text_logical_x + shaped.glyphs[self.cursor_pos].x) * scale;
+            } else {
+                cursor_screen_x = (text_logical_x + shaped.width) * scale;
             }
         }
 
-        if !is_empty && self.cursor_pos == shaped.glyphs.len() {
-            cursor_screen_x = (text_logical_x + shaped.width) * scale;
-        }
+        crate::text::emit_text_glyphs(
+            &shaped,
+            text_logical_x,
+            text_logical_baseline,
+            self.font_size,
+            text_color,
+            scale,
+            atlas,
+            rasterizer,
+            &mut prims,
+        );
 
         if self.is_focused && self.cursor_visible {
             let cursor_h = self.font_size * 1.2 * scale;
@@ -296,62 +273,71 @@ impl Widget for TextInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::Modifiers;
 
     #[test]
     fn test_text_input_typing_and_navigation() {
         let mut input = TextInput::new("Placeholder");
         assert!(!input.is_focused);
 
-        // Keystrokes ignored while unfocused
         let r1 = input.on_key_event(&KeyEvent::KeyDown {
             key: "h".to_string(),
+            keysym: 0,
             text: Some("h".to_string()),
+            modifiers: Modifiers::default(),
         });
         assert_eq!(r1, EventResponse::Ignored);
         assert_eq!(input.text.get(), "");
 
-        // Focus
         input.on_focus_change(true);
         assert!(input.is_focused);
 
-        // Type "Hi"
         input.on_key_event(&KeyEvent::KeyDown {
             key: "H".to_string(),
+            keysym: 0,
             text: Some("H".to_string()),
+            modifiers: Modifiers::default(),
         });
         input.on_key_event(&KeyEvent::KeyDown {
             key: "i".to_string(),
+            keysym: 0,
             text: Some("i".to_string()),
+            modifiers: Modifiers::default(),
         });
         assert_eq!(input.text.get(), "Hi");
         assert_eq!(input.cursor_pos, 2);
 
-        // Backspace
         input.on_key_event(&KeyEvent::KeyDown {
             key: "Backspace".to_string(),
+            keysym: 0xff08,
             text: None,
+            modifiers: Modifiers::default(),
         });
         assert_eq!(input.text.get(), "H");
         assert_eq!(input.cursor_pos, 1);
 
-        // Home navigation and insert at start
         input.on_key_event(&KeyEvent::KeyDown {
             key: "Home".to_string(),
+            keysym: 0xff50,
             text: None,
+            modifiers: Modifiers::default(),
         });
         assert_eq!(input.cursor_pos, 0);
 
         input.on_key_event(&KeyEvent::KeyDown {
             key: "A".to_string(),
+            keysym: 0,
             text: Some("A".to_string()),
+            modifiers: Modifiers::default(),
         });
         assert_eq!(input.text.get(), "AH");
         assert_eq!(input.cursor_pos, 1);
 
-        // Delete
         input.on_key_event(&KeyEvent::KeyDown {
             key: "Delete".to_string(),
+            keysym: 0xffff,
             text: None,
+            modifiers: Modifiers::default(),
         });
         assert_eq!(input.text.get(), "A");
     }

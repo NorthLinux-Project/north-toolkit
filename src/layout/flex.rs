@@ -149,12 +149,21 @@ impl LayoutRect {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Overflow {
+    #[default]
+    Visible,
+    Hidden,
+    Scroll,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlexStyle {
     pub direction: FlexDirection,
     pub wrap: FlexWrap,
     pub justify_content: JustifyContent,
     pub align_items: AlignItems,
+    pub overflow: Overflow,
     pub width: Dimension,
     pub height: Dimension,
     pub min_width: Option<f32>,
@@ -176,6 +185,7 @@ impl Default for FlexStyle {
             wrap: FlexWrap::NoWrap,
             justify_content: JustifyContent::FlexStart,
             align_items: AlignItems::Stretch,
+            overflow: Overflow::Visible,
             width: Dimension::Auto,
             height: Dimension::Auto,
             min_width: None,
@@ -337,7 +347,14 @@ impl LayoutEngine {
         let inner_avail_w = explicit_w.map(|w| (w - style.padding.horizontal()).max(0.0));
         let inner_avail_h = explicit_h.map(|h| (h - style.padding.vertical()).max(0.0));
 
-        let main_avail = if is_row { inner_avail_w } else { inner_avail_h };
+        let is_scroll_container = style.overflow == Overflow::Scroll;
+        let main_avail = if is_scroll_container {
+            None
+        } else if is_row {
+            inner_avail_w
+        } else {
+            inner_avail_h
+        };
         let _cross_avail = if is_row { inner_avail_h } else { inner_avail_w };
 
         for &child_id in &children_ids {

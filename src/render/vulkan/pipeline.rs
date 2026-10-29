@@ -236,12 +236,12 @@ impl GlyphPipeline {
         let frag_module = create_shader_module(device, GLYPH_FRAG_SPV)?;
 
         let sampler_info = vk::SamplerCreateInfo::default()
-            .mag_filter(vk::Filter::LINEAR)
-            .min_filter(vk::Filter::LINEAR)
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST)
             .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
             .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-            .mipmap_mode(vk::SamplerMipmapMode::LINEAR);
+            .mipmap_mode(vk::SamplerMipmapMode::NEAREST);
 
         let sampler = unsafe { device.create_sampler(&sampler_info, None) }
             .context("Failed to create glyph sampler")?;

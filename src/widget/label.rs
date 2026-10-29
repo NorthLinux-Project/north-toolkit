@@ -64,33 +64,19 @@ impl Widget for Label {
         let shaped = shaper.shape(self.text.get(), self.font_size);
 
         let mut primitives = Vec::with_capacity(shaped.glyphs.len());
-        let physical_font_size = (self.font_size * scale).round();
-        let baseline_y = ((rect.y + shaped.ascent) * scale).round();
+        let baseline = rect.y + shaped.ascent;
 
-        for glyph in shaped.glyphs {
-            let px_x = (rect.x + glyph.x) * scale;
-            let subpx = (px_x * 4.0).round() as i32;
-            let aligned_x = (subpx >> 2) as f32;
-            let bucket = (subpx & 3) as u8;
-
-            if let Ok(Some(region)) = atlas.get_or_insert(
-                rasterizer,
-                glyph.face_id,
-                glyph.glyph_id,
-                physical_font_size,
-                bucket,
-            ) {
-                let screen_x = aligned_x + region.offset_x;
-                let screen_y = baseline_y + region.offset_y;
-
-                primitives.push(RenderPrimitive::glyph(
-                    region.page,
-                    [screen_x, screen_y, region.width as f32, region.height as f32],
-                    region.uv_rect,
-                    text_color,
-                ));
-            }
-        }
+        crate::text::emit_text_glyphs(
+            &shaped,
+            rect.x,
+            baseline,
+            self.font_size,
+            text_color,
+            scale,
+            atlas,
+            rasterizer,
+            &mut primitives,
+        );
 
         primitives
     }

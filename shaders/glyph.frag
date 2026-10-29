@@ -13,8 +13,9 @@ void main() {
         discard;
     }
 
+    // High-fidelity gamma-corrected alpha blending
     float lum = dot(v_color.rgb, vec3(0.2126, 0.7152, 0.0722));
-    float gamma_factor = mix(1.15, 1.0 / 1.15, lum);
+    float gamma_factor = mix(1.05, 0.95, lum);
     float corrected_alpha = pow(raw_coverage, gamma_factor);
 
     out_color = vec4(v_color.rgb, v_color.a * corrected_alpha);

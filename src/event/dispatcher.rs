@@ -25,10 +25,54 @@ impl PointerEvent {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Modifiers {
+    pub shift: bool,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub logo: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyEvent {
-    KeyDown { key: String, text: Option<String> },
-    KeyUp { key: String },
+    KeyDown {
+        key: String,
+        keysym: u32,
+        text: Option<String>,
+        modifiers: Modifiers,
+    },
+    KeyUp {
+        key: String,
+        keysym: u32,
+        modifiers: Modifiers,
+    },
+}
+
+impl KeyEvent {
+    pub fn key(&self) -> &str {
+        match self {
+            KeyEvent::KeyDown { key, .. } | KeyEvent::KeyUp { key, .. } => key,
+        }
+    }
+
+    pub fn keysym(&self) -> u32 {
+        match self {
+            KeyEvent::KeyDown { keysym, .. } | KeyEvent::KeyUp { keysym, .. } => *keysym,
+        }
+    }
+
+    pub fn modifiers(&self) -> Modifiers {
+        match self {
+            KeyEvent::KeyDown { modifiers, .. } | KeyEvent::KeyUp { modifiers, .. } => *modifiers,
+        }
+    }
+
+    pub fn text(&self) -> Option<&str> {
+        match self {
+            KeyEvent::KeyDown { text, .. } => text.as_deref(),
+            KeyEvent::KeyUp { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

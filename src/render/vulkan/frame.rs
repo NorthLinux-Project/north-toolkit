@@ -137,22 +137,102 @@ impl FrameRenderer {
         extent: vk::Extent2D,
         clear_color: [f32; 4],
         primitives: &[RenderPrimitive],
+        popup_target: Option<(
+            vk::Image,
+            vk::ImageView,
+            vk::Extent2D,
+            [f32; 4],
+            &[RenderPrimitive],
+        )>,
         quad_pipeline: &QuadPipeline,
         glyph_pipeline: &GlyphPipeline,
     ) -> Result<vk::CommandBuffer> {
-        let sync = &self.frames[self.current_frame];
-        let cmd = sync.command_buffer;
+        let (cmd, fence, glyph_capacity, glyph_mapped, glyph_buffer) = {
+            let sync = &self.frames[self.current_frame];
+            (
+                sync.command_buffer,
+                sync.fence,
+                sync.glyph_capacity,
+                sync.glyph_mapped,
+                sync.glyph_buffer,
+            )
+        };
 
+        // SAFETY: fence must be a valid Vulkan fence handle. We wait for fence completion
+        // before recording to ensure previous GPU execution on this frame's resources is finished.
         unsafe {
             context
                 .device
-                .wait_for_fences(&[sync.fence], true, u64::MAX)?;
-            context.device.reset_fences(&[sync.fence])?;
+                .wait_for_fences(&[fence], true, u64::MAX)?;
+            context.device.reset_fences(&[fence])?;
 
             let begin_info = vk::CommandBufferBeginInfo::default()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             context.device.begin_command_buffer(cmd, &begin_info)?;
 
+            let mut glyph_write_offset = 0usize;
+
+            self.record_surface_pass(
+                context,
+                cmd,
+                glyph_capacity,
+                glyph_mapped,
+                glyph_buffer,
+                target_image,
+                target_view,
+                extent,
+                clear_color,
+                primitives,
+                quad_pipeline,
+                glyph_pipeline,
+                &mut glyph_write_offset,
+            );
+
+            if let Some((popup_image, popup_view, popup_extent, popup_clear, popup_prims)) =
+                popup_target
+            {
+                self.record_surface_pass(
+                    context,
+                    cmd,
+                    glyph_capacity,
+                    glyph_mapped,
+                    glyph_buffer,
+                    popup_image,
+                    popup_view,
+                    popup_extent,
+                    popup_clear,
+                    popup_prims,
+                    quad_pipeline,
+                    glyph_pipeline,
+                    &mut glyph_write_offset,
+                );
+            }
+
+            context.device.end_command_buffer(cmd)?;
+        }
+
+        Ok(cmd)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn record_surface_pass(
+        &mut self,
+        context: &VulkanContext,
+        cmd: vk::CommandBuffer,
+        glyph_capacity: usize,
+        glyph_mapped: *mut GlyphInstance,
+        glyph_buffer: vk::Buffer,
+        target_image: vk::Image,
+        target_view: vk::ImageView,
+        extent: vk::Extent2D,
+        clear_color: [f32; 4],
+        primitives: &[RenderPrimitive],
+        quad_pipeline: &QuadPipeline,
+        glyph_pipeline: &GlyphPipeline,
+        glyph_write_offset: &mut usize,
+    ) {
+        // SAFETY: Transitioning target_image into COLOR_ATTACHMENT_OPTIMAL via pipeline barrier 2
+        unsafe {
             let barrier_to_color = vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
                 .src_access_mask(vk::AccessFlags2::empty())
@@ -169,8 +249,8 @@ impl FrameRenderer {
                     layer_count: 1,
                 });
 
-            let dep_info_color = vk::DependencyInfo::default()
-                .image_memory_barriers(std::slice::from_ref(&barrier_to_color));
+            let dep_info_color =
+                vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_to_color));
             context.device.cmd_pipeline_barrier2(cmd, &dep_info_color);
 
             let clear_value = vk::ClearValue {
@@ -210,9 +290,7 @@ impl FrameRenderer {
                 offset: vk::Offset2D { x: 0, y: 0 },
                 extent,
             };
-            context
-                .device
-                .cmd_set_scissor(cmd, 0, &[initial_scissor]);
+            context.device.cmd_set_scissor(cmd, 0, &[initial_scissor]);
 
             self.scissor_stack.clear();
             self.scissor_stack.push(initial_scissor);
@@ -222,17 +300,16 @@ impl FrameRenderer {
             let mut current_pipeline_mode = 0u8;
             let mut glyph_instances: Vec<GlyphInstance> = Vec::with_capacity(256);
             let mut pending_page: Option<u8> = None;
-            let mut glyph_write_offset = 0usize;
 
             let flush_glyphs = |page_opt: &mut Option<u8>,
                                 instances: &mut Vec<GlyphInstance>,
                                 offset: &mut usize| {
                 if let Some(page) = page_opt.take() {
                     let count = instances.len();
-                    if count > 0 && (*offset + count) <= sync.glyph_capacity {
+                    if count > 0 && (*offset + count) <= glyph_capacity {
                         std::ptr::copy_nonoverlapping(
                             instances.as_ptr(),
-                            sync.glyph_mapped.add(*offset),
+                            glyph_mapped.add(*offset),
                             count,
                         );
 
@@ -254,9 +331,8 @@ impl FrameRenderer {
                             &[],
                         );
 
-                        let buffers = [sync.glyph_buffer];
-                        let offsets =
-                            [(*offset * mem::size_of::<GlyphInstance>()) as vk::DeviceSize];
+                        let buffers = [glyph_buffer];
+                        let offsets = [(*offset * mem::size_of::<GlyphInstance>()) as vk::DeviceSize];
                         context
                             .device
                             .cmd_bind_vertex_buffers(cmd, 0, &buffers, &offsets);
@@ -284,7 +360,7 @@ impl FrameRenderer {
             for prim in primitives {
                 match *prim {
                     RenderPrimitive::ClipPush { rect } => {
-                        flush_glyphs(&mut pending_page, &mut glyph_instances, &mut glyph_write_offset);
+                        flush_glyphs(&mut pending_page, &mut glyph_instances, glyph_write_offset);
 
                         let current_scissor = self.scissor_stack.last().cloned().unwrap();
                         let min_x = (rect[0].max(0.0) as i32).max(current_scissor.offset.x);
@@ -312,7 +388,7 @@ impl FrameRenderer {
                         current_pipeline_mode = 0;
                     }
                     RenderPrimitive::ClipPop => {
-                        flush_glyphs(&mut pending_page, &mut glyph_instances, &mut glyph_write_offset);
+                        flush_glyphs(&mut pending_page, &mut glyph_instances, glyph_write_offset);
 
                         if self.scissor_stack.len() > 1 {
                             self.scissor_stack.pop();
@@ -329,7 +405,7 @@ impl FrameRenderer {
                         uv_rect,
                         use_texture,
                     } => {
-                        flush_glyphs(&mut pending_page, &mut glyph_instances, &mut glyph_write_offset);
+                        flush_glyphs(&mut pending_page, &mut glyph_instances, glyph_write_offset);
 
                         if current_pipeline_mode != 1 {
                             context.device.cmd_bind_pipeline(
@@ -396,7 +472,7 @@ impl FrameRenderer {
                         color,
                     } => {
                         if pending_page != Some(page) {
-                            flush_glyphs(&mut pending_page, &mut glyph_instances, &mut glyph_write_offset);
+                            flush_glyphs(&mut pending_page, &mut glyph_instances, glyph_write_offset);
                             pending_page = Some(page);
                         }
                         glyph_instances.push(GlyphInstance {
@@ -409,7 +485,7 @@ impl FrameRenderer {
                 }
             }
 
-            flush_glyphs(&mut pending_page, &mut glyph_instances, &mut glyph_write_offset);
+            flush_glyphs(&mut pending_page, &mut glyph_instances, glyph_write_offset);
 
             context.device.cmd_end_rendering(cmd);
 
@@ -429,14 +505,10 @@ impl FrameRenderer {
                     layer_count: 1,
                 });
 
-            let dep_info_present = vk::DependencyInfo::default()
-                .image_memory_barriers(std::slice::from_ref(&barrier_to_present));
+            let dep_info_present =
+                vk::DependencyInfo::default().image_memory_barriers(std::slice::from_ref(&barrier_to_present));
             context.device.cmd_pipeline_barrier2(cmd, &dep_info_present);
-
-            context.device.end_command_buffer(cmd)?;
         }
-
-        Ok(cmd)
     }
 
     pub fn destroy(&self, device: &ash::Device) {

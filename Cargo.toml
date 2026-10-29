@@ -26,6 +26,9 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # Event loop
 calloop = { version = "0.14", features = ["signals"] }
 
+# Keyboard / XKB
+xkbcommon = "0.8"
+
 # Font / Text
 swash = "0.1"
 rustybuzz = "0.14"

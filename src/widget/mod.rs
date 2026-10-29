@@ -1,17 +1,26 @@
 pub mod button;
+pub mod checkbox;
 pub mod container;
 pub mod image;
 pub mod label;
+pub mod popup;
 pub mod scroll_area;
+pub mod slider;
 pub mod state;
+pub mod switch;
 pub mod text_input;
 pub mod tree;
 
 pub use button::Button;
+pub use checkbox::Checkbox;
 pub use container::Container;
 pub use image::Image;
 pub use label::Label;
+pub use popup::{Dropdown, MenuItem, PopupMenu};
 pub use scroll_area::ScrollArea;
+pub use slider::Slider;
 pub use state::Property;
+pub use switch::Switch;
 pub use text_input::TextInput;
-pub use tree::{Widget, WidgetNode, WidgetTree};
+pub use crate::event::WidgetId;
+pub use tree::{PopupRequest, Widget, WidgetNode, WidgetTree};
