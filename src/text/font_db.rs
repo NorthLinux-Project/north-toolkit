@@ -1,3 +1,5 @@
+//! System font discovery, fallback resolution, and face caching using `fontdb`.
+
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -5,6 +7,7 @@ use anyhow::{Context, Result};
 use fontdb::{Database, Family, ID, Query, Stretch, Style, Weight};
 use swash::FontRef;
 
+/// Thread-safe system and bundled font database with fallback caching.
 #[derive(Clone)]
 pub struct FontDatabase {
     db: Arc<Database>,
@@ -13,6 +16,7 @@ pub struct FontDatabase {
 }
 
 impl FontDatabase {
+    /// Loads system fonts and resolves the default sans-serif font family.
     pub fn new() -> Result<Self> {
         let mut db = Database::new();
         db.load_system_fonts();
@@ -50,10 +54,12 @@ impl FontDatabase {
         })
     }
 
+    /// Returns the ID of the default sans-serif font face.
     pub fn default_face(&self) -> ID {
         self.default_sans
     }
 
+    /// Queries a font face matching the requested family name, weight, and style.
     pub fn query_face(&self, family_name: &str, weight: u16, style: Style) -> ID {
         let query = Query {
             families: &[Family::Name(family_name), Family::SansSerif],
@@ -64,6 +70,7 @@ impl FontDatabase {
         self.db.query(&query).unwrap_or(self.default_sans)
     }
 
+    /// Resolves the best font face supporting character `ch`, checking `preferred_face` first.
     pub fn face_for_char(&self, ch: char, preferred_face: ID) -> ID {
         if self.face_has_glyph(preferred_face, ch) {
             return preferred_face;
@@ -92,6 +99,7 @@ impl FontDatabase {
         found.unwrap_or(preferred_face)
     }
 
+    /// Returns `true` if the font face contains a glyph mapping for character `ch`.
     pub fn face_has_glyph(&self, face_id: ID, ch: char) -> bool {
         self.db
             .with_face_data(face_id, |data, index| {
@@ -102,6 +110,7 @@ impl FontDatabase {
             .unwrap_or(false)
     }
 
+    /// Accesses raw font face byte slice and index within the font collection.
     pub fn with_face_data<R, F: FnOnce(&[u8], u32) -> R>(&self, face_id: ID, f: F) -> Option<R> {
         self.db.with_face_data(face_id, f)
     }

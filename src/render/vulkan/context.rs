@@ -1,3 +1,5 @@
+//! Vulkan 1.3 physical device discovery, instance creation, queue allocation, and memory types.
+
 use std::ffi::{CStr, CString};
 use std::sync::Arc;
 
@@ -7,18 +9,28 @@ use ash::{Device, Entry, Instance};
 use raw_window_handle::RawDisplayHandle;
 use tracing::info;
 
+/// Vulkan 1.3 instance and logical device context.
 pub struct VulkanContext {
+    /// Vulkan function loader entry point.
     pub entry: Entry,
+    /// Vulkan instance handle.
     pub instance: Instance,
+    /// Selected physical GPU device handle.
     pub physical_device: vk::PhysicalDevice,
+    /// Logical device handle wrapped in `Arc`.
     pub device: Arc<Device>,
+    /// Primary graphics queue handle.
     pub graphics_queue: vk::Queue,
+    /// Index of the graphics queue family.
     pub graphics_queue_family: u32,
+    /// Properties of the chosen physical device.
     pub device_properties: vk::PhysicalDeviceProperties,
+    /// Memory heaps and types of the physical device.
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
 }
 
 impl VulkanContext {
+    /// Initializes Vulkan 1.3 with dynamic rendering and synchronization2.
     pub fn new(display_handle: Option<RawDisplayHandle>) -> Result<Self> {
         let entry = unsafe { Entry::load() }.context("Failed to load Vulkan entry point")?;
 
@@ -132,6 +144,7 @@ impl VulkanContext {
         })
     }
 
+    /// Finds a compatible memory type index satisfying given type filter and property flags.
     pub fn find_memory_type(
         &self,
         type_filter: u32,

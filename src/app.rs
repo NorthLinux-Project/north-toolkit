@@ -1,3 +1,6 @@
+//! Central application orchestrator, event loop, and frame coordinator.
+
+use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -10,24 +13,33 @@ use crate::event::{EventDispatcher, PointerEvent};
 use crate::layout::{LayoutEngine, LayoutRect};
 use crate::platform::WaylandWindow;
 use crate::render::{
-    FrameRenderer, GlyphAtlas, GlyphPipeline, QuadPipeline, VulkanContext, VulkanSwapchain,
-    VulkanTexture,
+    FrameRenderer, GlyphAtlas, GlyphPipeline, QuadPipeline, VectorAtlas, VulkanContext,
+    VulkanSwapchain, VulkanTexture,
 };
 use crate::text::{GlyphRasterizer, TextShaper};
 use crate::theme::Theme;
 use crate::widget::{PopupMenu, Widget, WidgetId, WidgetTree};
 
+/// Represents an active popup menu session rendered onto an auxiliary Wayland subsurface or popup.
 pub struct ActivePopupSession {
+    /// Identifier of the widget that triggered this popup session.
     pub source_widget: WidgetId,
+    /// The popup menu model and items.
     pub menu: PopupMenu,
+    /// Vulkan surface handle associated with the popup window.
     pub surface: vk::SurfaceKHR,
+    /// Swapchain providing swap images for popup presentation.
     pub swapchain: VulkanSwapchain,
+    /// Popup width in physical pixels.
     pub width: u32,
+    /// Popup height in physical pixels.
     pub height: u32,
+    /// Semaphore signaled when an image is ready for presentation.
     pub image_available: vk::Semaphore,
 }
 
 impl ActivePopupSession {
+    /// Cleans up and destroys Vulkan resources associated with the popup session.
     pub fn destroy(self, context: &VulkanContext, surface_loader: &surface::Instance) {
         unsafe {
             context.device.device_wait_idle().ok();
@@ -38,27 +50,51 @@ impl ActivePopupSession {
     }
 }
 
+/// The top-level North Toolkit application coordinator.
+///
+/// Integrates the Wayland client connection, Vulkan 1.3 swapchain and rendering pipelines,
+/// dynamic text and vector atlases, layout engine, and Calloop event loop.
 pub struct Application {
+    /// Wayland window and client connection state.
     pub window: WaylandWindow,
+    /// Vulkan instance, physical device, and logical device context.
     pub context: VulkanContext,
+    /// Surface loader for surface lifecycle operations.
     pub surface_loader: surface::Instance,
+    /// Main window Vulkan surface.
     pub surface: vk::SurfaceKHR,
+    /// Main window swapchain.
     pub swapchain: VulkanSwapchain,
+    /// Pipeline for rendering solid, rounded, and stroked quads.
     pub quad_pipeline: QuadPipeline,
+    /// Pipeline for rendering rasterized text glyphs.
     pub glyph_pipeline: GlyphPipeline,
-    pub default_texture: VulkanTexture,
+    /// Texture backing the vector graphics dynamic atlas.
+    pub vector_texture: VulkanTexture,
+    /// Textures backing glyph cache pages.
     pub atlas_textures: Vec<VulkanTexture>,
+    /// Double/triple-buffered frame synchronizer.
     pub frame_renderer: FrameRenderer,
+    /// Dynamic bin-packing glyph atlas.
     pub atlas: GlyphAtlas,
+    /// Dynamic SVG vector atlas.
+    pub vector_atlas: VectorAtlas,
+    /// OpenType font shaper.
     pub shaper: TextShaper,
+    /// Glyph rasterizer.
     pub rasterizer: GlyphRasterizer,
+    /// Flexbox layout computation engine.
     pub layout_engine: LayoutEngine,
+    /// Pointer and keyboard event dispatcher.
     pub event_dispatcher: EventDispatcher,
+    /// Active visual design theme.
     pub theme: Theme,
+    /// Currently active popup session, if any.
     pub active_popup: Option<ActivePopupSession>,
 }
 
 impl Application {
+    /// Creates and initializes a new North Toolkit application window with Vulkan hardware acceleration.
     pub fn new(title: &str, width: u32, height: u32) -> Result<Self> {
         let window = WaylandWindow::new(title, width, height)?;
         let context = VulkanContext::new(Some(window.display_handle))?;
@@ -92,18 +128,21 @@ impl Application {
 
         let frame_renderer = FrameRenderer::new(&context)?;
 
-        let default_texture = VulkanTexture::new_2d(
+        let vector_w = 2048u32;
+        let vector_h = 2048u32;
+        let mut vector_atlas = VectorAtlas::new(vector_w, vector_h);
+        let vector_texture = VulkanTexture::new_2d(
             &context,
-            1,
-            1,
+            vector_w,
+            vector_h,
             vk::Format::R8G8B8A8_UNORM,
             vk::ImageUsageFlags::SAMPLED,
         )?;
-        let white_pixel = [255u8, 255u8, 255u8, 255u8];
-        default_texture.upload_data(
+        let _ = vector_atlas.take_dirty_rects();
+        vector_texture.upload_data(
             &context,
             frame_renderer.frames[0].command_pool,
-            &white_pixel,
+            &vector_atlas.data,
         )?;
 
         let atlas_w = 2048u32;
@@ -118,7 +157,7 @@ impl Application {
         let atlas_textures = vec![initial_atlas_texture];
 
         let quad_pipeline =
-            QuadPipeline::new(&context.device, swapchain.format, &default_texture)?;
+            QuadPipeline::new(&context.device, swapchain.format, &vector_texture)?;
         let glyph_pipeline =
             GlyphPipeline::new(&context.device, swapchain.format, &atlas_textures)?;
 
@@ -139,10 +178,11 @@ impl Application {
             swapchain,
             quad_pipeline,
             glyph_pipeline,
-            default_texture,
+            vector_texture,
             atlas_textures,
             frame_renderer,
             atlas,
+            vector_atlas,
             shaper,
             rasterizer,
             layout_engine,
@@ -152,6 +192,18 @@ impl Application {
         })
     }
 
+    /// Configures the window decoration mode (server-side vs client-side).
+    pub fn with_decorations(mut self, mode: crate::platform::WindowDecorations) -> Self {
+        self.window.set_decoration_mode(mode);
+        self
+    }
+
+    /// Sets the window decoration mode dynamically.
+    pub fn set_decorations(&mut self, mode: crate::platform::WindowDecorations) {
+        self.window.set_decoration_mode(mode);
+    }
+
+    /// Enters the main Calloop event loop and renders frames for the given widget tree.
     pub fn run(mut self, mut tree: WidgetTree) -> Result<()> {
         let mut event_loop: EventLoop<crate::platform::WaylandState> =
             EventLoop::try_new().context("Failed to create Calloop event loop")?;
@@ -184,9 +236,10 @@ impl Application {
 
             let anim_dirty = tree.tick_animations(delta_ms);
             let is_dirty = tree.is_dirty() || anim_dirty || self.active_popup.is_some();
+            let has_pending_pipes = !self.window.state.pending_paste_pipes.is_empty();
 
-            let timeout = if anim_dirty {
-                Some(Duration::from_millis(8))
+            let timeout = if anim_dirty || has_pending_pipes {
+                Some(Duration::from_millis(4))
             } else if is_dirty && !self.window.state.frame_ready {
                 Some(Duration::from_millis(4))
             } else {
@@ -209,6 +262,43 @@ impl Application {
                 }
                 eq.dispatch_pending(&mut self.window.state)?;
                 self.window.connection.flush()?;
+            }
+
+            let mut i = 0;
+            while i < self.window.state.pending_paste_pipes.len() {
+                let pipe = &mut self.window.state.pending_paste_pipes[i];
+                let mut chunk = [0u8; 4096];
+                // SAFETY: reading from non-blocking pipe owned by PipeReader
+                let ret = unsafe {
+                    libc::read(
+                        pipe.fd.as_raw_fd(),
+                        chunk.as_mut_ptr() as *mut libc::c_void,
+                        chunk.len(),
+                    )
+                };
+                if ret > 0 {
+                    pipe.buffer.extend_from_slice(&chunk[..ret as usize]);
+                    i += 1;
+                } else if ret == 0 {
+                    let finished = self.window.state.pending_paste_pipes.remove(i);
+                    let is_primary = finished.target == crate::platform::clipboard::SelectionTarget::Primary;
+                    let text = String::from_utf8_lossy(&finished.buffer).to_string();
+                    self.window.state.paste_events.push((text, is_primary));
+                } else {
+                    let err = std::io::Error::last_os_error();
+                    if err.kind() == std::io::ErrorKind::WouldBlock {
+                        i += 1;
+                    } else {
+                        self.window.state.pending_paste_pipes.remove(i);
+                    }
+                }
+            }
+
+            let mut paste_events = Vec::new();
+            std::mem::swap(&mut paste_events, &mut self.window.state.paste_events);
+            for (text, is_primary) in paste_events {
+                tree.dispatch_paste(&self.event_dispatcher, &text, is_primary);
+                self.window.request_frame();
             }
 
             if let Some(popup) = &self.active_popup {
@@ -274,6 +364,15 @@ impl Application {
                 }
             }
 
+            if !pointer_events.is_empty() {
+                let cursor_icon = if self.active_popup.is_some() && self.window.is_pointer_on_popup() {
+                    crate::event::CursorIcon::Pointer
+                } else {
+                    tree.query_cursor_icon(&self.layout_engine, &self.event_dispatcher)
+                };
+                self.window.set_cursor_shape(cursor_icon);
+            }
+
             let mut key_events = Vec::new();
             std::mem::swap(&mut key_events, &mut self.window.state.key_events);
             for evt in &key_events {
@@ -298,6 +397,43 @@ impl Application {
                 let resp = tree.dispatch_key_event(&mut self.event_dispatcher, evt);
                 if resp == crate::event::EventResponse::Handled {
                     tree.dirty = true;
+                }
+            }
+
+            for action in tree.take_clipboard_actions() {
+                match action {
+                    crate::widget::ClipboardAction::SetClipboard(text) => {
+                        self.window.set_clipboard_text(text);
+                    }
+                    crate::widget::ClipboardAction::SetPrimary(text) => {
+                        self.window.set_primary_text(text);
+                    }
+                    crate::widget::ClipboardAction::RequestPaste(target) => {
+                        self.window.request_paste(target);
+                    }
+                }
+            }
+
+            tree.set_maximized(self.window.state.is_maximized);
+            tree.set_csd_enabled(self.window.state.decoration_mode == crate::platform::WindowDecorations::ClientSide);
+
+            for action in tree.take_window_actions() {
+                match action {
+                    crate::widget::WindowAction::InteractiveMove => {
+                        self.window.start_interactive_move();
+                    }
+                    crate::widget::WindowAction::InteractiveResize(edge) => {
+                        self.window.start_interactive_resize(edge);
+                    }
+                    crate::widget::WindowAction::Minimize => {
+                        self.window.minimize();
+                    }
+                    crate::widget::WindowAction::ToggleMaximize => {
+                        self.window.toggle_maximize();
+                    }
+                    crate::widget::WindowAction::Close => {
+                        self.window.state.should_exit = true;
+                    }
                 }
             }
 
@@ -445,6 +581,7 @@ impl Application {
                     &mut self.atlas,
                     &self.rasterizer,
                     &self.shaper,
+                    &mut self.vector_atlas,
                     self.window.state.scale,
                 );
 
@@ -462,6 +599,7 @@ impl Application {
                                 &mut self.atlas,
                                 &self.rasterizer,
                                 &self.shaper,
+                                &mut self.vector_atlas,
                                 self.window.state.scale,
                             );
                             (
@@ -483,6 +621,15 @@ impl Application {
                 } else {
                     (None, None)
                 };
+
+                if self.vector_atlas.is_dirty() {
+                    let _ = self.vector_atlas.take_dirty_rects();
+                    self.vector_texture.upload_data(
+                        &self.context,
+                        command_pool,
+                        &self.vector_atlas.data,
+                    )?;
+                }
 
                 if self.atlas.is_dirty() {
                     let (atlas_w, atlas_h) = self.atlas.dimensions();
@@ -589,7 +736,7 @@ impl Drop for Application {
             self.frame_renderer.destroy(&self.context.device);
             self.quad_pipeline.destroy(&self.context.device);
             self.glyph_pipeline.destroy(&self.context.device);
-            self.default_texture.destroy(&self.context.device);
+            self.vector_texture.destroy(&self.context.device);
             for texture in &self.atlas_textures {
                 texture.destroy(&self.context.device);
             }

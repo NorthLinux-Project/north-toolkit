@@ -1,3 +1,5 @@
+//! Scrollable viewport container with animated scroll inertia and interactive scrollbar thumb dragging.
+
 use std::any::Any;
 
 use super::tree::Widget;
@@ -7,19 +9,30 @@ use crate::render::{CornerRadii, GlyphAtlas, RenderPrimitive};
 use crate::text::{GlyphRasterizer, TextShaper};
 use crate::theme::Theme;
 
+/// Viewport widget providing smooth scrolling and draggable scrollbars for oversized content.
 pub struct ScrollArea {
+    /// Flexbox layout style.
     pub style: FlexStyle,
+    /// Current horizontal scroll offset in logical points.
     pub scroll_x: f32,
+    /// Current vertical scroll offset in logical points.
     pub scroll_y: f32,
+    /// Target vertical scroll offset for smooth spring-damper interpolation.
     pub target_scroll_y: f32,
+    /// Maximum vertical scroll limit in logical points.
     pub max_scroll_y: f32,
+    /// Whether the user is actively dragging the scrollbar thumb with the pointer.
     pub is_dragging_thumb: bool,
+    /// Pointer y coordinate at the start of the thumb drag gesture.
     pub drag_start_pointer_y: f32,
+    /// Scroll offset at the start of the thumb drag gesture.
     pub drag_start_scroll_y: f32,
+    /// Whether the scrollbar thumb or track is currently hovered by the pointer.
     pub thumb_hovered: bool,
 }
 
 impl ScrollArea {
+    /// Creates a new scroll area wrapping the provided style and setting overflow to scroll.
     pub fn new(mut style: FlexStyle) -> Self {
         style.overflow = Overflow::Scroll;
         Self {
@@ -35,17 +48,20 @@ impl ScrollArea {
         }
     }
 
+    /// Sets the fixed dimensions of the scroll area viewport.
     pub fn with_size(mut self, width: f32, height: f32) -> Self {
         self.style.width = Dimension::Points(width);
         self.style.height = Dimension::Points(height);
         self
     }
 
+    /// Sets the maximum vertical scroll boundary.
     pub fn with_max_scroll(mut self, max: f32) -> Self {
         self.max_scroll_y = max;
         self
     }
 
+    /// Computes the track and thumb layout rectangles for the vertical scrollbar.
     pub fn track_and_thumb_rects(&self, rect: LayoutRect) -> (LayoutRect, LayoutRect) {
         let track_w = 8.0;
         let track_x = rect.x + rect.width - track_w - 3.0;
@@ -99,7 +115,7 @@ impl Widget for ScrollArea {
                 if rect.contains(x, y) {
                     let step = dy * 36.0;
                     self.target_scroll_y =
-                        (self.target_scroll_y - step).clamp(0.0, self.max_scroll_y);
+                        (self.target_scroll_y + step).clamp(0.0, self.max_scroll_y);
                     return EventResponse::Handled;
                 }
             }
@@ -162,6 +178,7 @@ impl Widget for ScrollArea {
         _atlas: &mut GlyphAtlas,
         _rasterizer: &GlyphRasterizer,
         _shaper: &TextShaper,
+        _vector_atlas: &mut crate::render::VectorAtlas,
         scale: f32,
     ) -> Vec<RenderPrimitive> {
         vec![RenderPrimitive::ClipPush {
@@ -181,6 +198,7 @@ impl Widget for ScrollArea {
         _atlas: &mut GlyphAtlas,
         _rasterizer: &GlyphRasterizer,
         _shaper: &TextShaper,
+        _vector_atlas: &mut crate::render::VectorAtlas,
         scale: f32,
     ) -> Vec<RenderPrimitive> {
         let mut prims = Vec::new();
@@ -223,6 +241,17 @@ impl Widget for ScrollArea {
         prims
     }
 
+    fn cursor_icon_at(&self, rel_x: f32, _rel_y: f32) -> crate::event::CursorIcon {
+        let width = self.style.width.resolve(None).unwrap_or(0.0);
+        if self.is_dragging_thumb {
+            crate::event::CursorIcon::Grabbing
+        } else if self.thumb_hovered || (width > 0.0 && rel_x >= width - 14.0) {
+            crate::event::CursorIcon::Pointer
+        } else {
+            crate::event::CursorIcon::Default
+        }
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -241,12 +270,13 @@ mod tests {
         let shaper = TextShaper::default_system_font().expect("Failed font load");
         let rasterizer = GlyphRasterizer::new(shaper.font_db().clone());
         let mut atlas = GlyphAtlas::new(512, 512, 1);
+        let mut vector_atlas = crate::render::VectorAtlas::new(256, 256);
         let theme = Theme::dark();
 
         let mut scroll = ScrollArea::new(FlexStyle::default()).with_max_scroll(500.0);
         let rect = LayoutRect::new(10.0, 20.0, 200.0, 300.0);
 
-        let before = scroll.paint_before(rect, &theme, &mut atlas, &rasterizer, &shaper, 1.0);
+        let before = scroll.paint_before(rect, &theme, &mut atlas, &rasterizer, &shaper, &mut vector_atlas, 1.0);
         assert_eq!(before.len(), 1);
         match &before[0] {
             RenderPrimitive::ClipPush { rect: clip_rect } => {
@@ -255,7 +285,7 @@ mod tests {
             _ => panic!("Expected ClipPush"),
         }
 
-        let after = scroll.paint_after(rect, &theme, &mut atlas, &rasterizer, &shaper, 1.0);
+        let after = scroll.paint_after(rect, &theme, &mut atlas, &rasterizer, &shaper, &mut vector_atlas, 1.0);
         assert!(!after.is_empty());
         assert_eq!(after.last().unwrap(), &RenderPrimitive::ClipPop);
 
@@ -265,7 +295,7 @@ mod tests {
                 x: 50.0,
                 y: 50.0,
                 dx: 0.0,
-                dy: -2.0,
+                dy: 2.0,
             },
             rect,
         );

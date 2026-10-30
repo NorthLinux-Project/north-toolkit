@@ -48,7 +48,8 @@ void main() {
     vec4 base_color = v_color;
     if (use_texture > 0.5) {
         vec4 tex_color = texture(u_texture, v_uv);
-        base_color = base_color * tex_color;
+        vec3 unmultiplied_rgb = tex_color.a > 0.001 ? (tex_color.rgb / tex_color.a) : tex_color.rgb;
+        base_color = vec4(base_color.rgb * unmultiplied_rgb, base_color.a * tex_color.a);
     }
 
     if (border_width > 0.0) {

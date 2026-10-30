@@ -1,3 +1,5 @@
+//! Per-frame synchronization, double/triple buffering, dynamic rendering, and command recording.
+
 use std::mem;
 
 use anyhow::Result;
@@ -9,31 +11,47 @@ use super::pipeline::{
 };
 use crate::render::primitives::RenderPrimitive;
 
+/// Number of frames recorded and presented concurrently in flight.
 pub const MAX_FRAMES_IN_FLIGHT: usize = 2;
+/// Initial instance buffer capacity for text glyph quads.
 pub const INITIAL_GLYPH_CAPACITY: usize = 8192;
 
+/// Synchronization primitives and transient vertex buffers for a single frame in flight.
 pub struct FrameSync {
+    /// Command pool owning the frame's command buffer.
     pub command_pool: vk::CommandPool,
+    /// Primary command buffer for recording render passes.
     pub command_buffer: vk::CommandBuffer,
+    /// Semaphore signaled when swapchain image acquisition completes.
     pub image_available: vk::Semaphore,
+    /// Semaphore signaled when rendering commands have completed on the GPU.
     pub render_finished: vk::Semaphore,
+    /// Fence ensuring the CPU does not overwrite in-flight command buffers.
     pub fence: vk::Fence,
+    /// Dynamic vertex buffer holding per-frame glyph instances.
     pub glyph_buffer: vk::Buffer,
+    /// Host-visible device memory backing `glyph_buffer`.
     pub glyph_memory: vk::DeviceMemory,
+    /// Maximum number of glyph instances that can be stored before reallocation.
     pub glyph_capacity: usize,
+    /// Host mapped pointer to `glyph_memory`.
     pub glyph_mapped: *mut GlyphInstance,
 }
 
 unsafe impl Send for FrameSync {}
 unsafe impl Sync for FrameSync {}
 
+/// Double-buffered frame synchronizer and command recorder.
 pub struct FrameRenderer {
+    /// Array of per-frame synchronization objects.
     pub frames: [FrameSync; MAX_FRAMES_IN_FLIGHT],
+    /// Index of the current active frame in flight (0 or 1).
     pub current_frame: usize,
     scissor_stack: Vec<vk::Rect2D>,
 }
 
 impl FrameRenderer {
+    /// Initializes frame synchronization objects and dynamic glyph instance buffers.
     pub fn new(context: &VulkanContext) -> Result<Self> {
         let mut frames = Vec::with_capacity(MAX_FRAMES_IN_FLIGHT);
 
@@ -121,14 +139,17 @@ impl FrameRenderer {
         })
     }
 
+    /// Returns a reference to the active frame's synchronization primitives.
     pub fn current_sync(&self) -> &FrameSync {
         &self.frames[self.current_frame]
     }
 
+    /// Advances to the next frame in the double-buffer ring.
     pub fn advance_frame(&mut self) {
         self.current_frame = (self.current_frame + 1) % MAX_FRAMES_IN_FLIGHT;
     }
 
+    /// Records GPU draw calls for the supplied primitive batch into a command buffer.
     pub fn record_render_commands(
         &mut self,
         context: &VulkanContext,
@@ -511,6 +532,7 @@ impl FrameRenderer {
         }
     }
 
+    /// Destroys all command pools, fences, semaphores, and glyph buffers.
     pub fn destroy(&self, device: &ash::Device) {
         unsafe {
             for frame in &self.frames {
@@ -526,6 +548,7 @@ impl FrameRenderer {
     }
 }
 
+/// Generates a 4x4 orthographic projection matrix mapping `[0, width] x [0, height]` to Vulkan NDC `[-1, 1]`.
 pub fn orthographic_matrix(width: f32, height: f32) -> [f32; 16] {
     if width <= 0.0 || height <= 0.0 {
         return [

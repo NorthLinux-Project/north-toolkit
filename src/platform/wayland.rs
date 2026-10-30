@@ -1,4 +1,7 @@
+//! Native Wayland client integration via `wayland-client` and `wayland-protocols`.
+
 use std::ffi::c_void;
+use std::os::fd::AsFd;
 use std::ptr::NonNull;
 
 use anyhow::{Context, Result};
@@ -8,6 +11,10 @@ use raw_window_handle::{
 use wayland_client::protocol::{
     wl_callback::{self, WlCallback},
     wl_compositor::{self, WlCompositor},
+    wl_data_device::{self, WlDataDevice},
+    wl_data_device_manager::{self, WlDataDeviceManager},
+    wl_data_offer::{self, WlDataOffer},
+    wl_data_source::{self, WlDataSource},
     wl_keyboard::{self, WlKeyboard},
     wl_pointer::{self, WlPointer},
     wl_registry::{self, WlRegistry},
@@ -17,6 +24,16 @@ use wayland_client::protocol::{
 };
 use wayland_client::{
     Connection, Dispatch, EventQueue, Proxy, QueueHandle,
+};
+use wayland_protocols::wp::cursor_shape::v1::client::{
+    wp_cursor_shape_device_v1::{self, WpCursorShapeDeviceV1},
+    wp_cursor_shape_manager_v1::{self, WpCursorShapeManagerV1},
+};
+use wayland_protocols::wp::primary_selection::zv1::client::{
+    zwp_primary_selection_device_manager_v1::{self, ZwpPrimarySelectionDeviceManagerV1},
+    zwp_primary_selection_device_v1::{self, ZwpPrimarySelectionDeviceV1},
+    zwp_primary_selection_offer_v1::{self, ZwpPrimarySelectionOfferV1},
+    zwp_primary_selection_source_v1::{self, ZwpPrimarySelectionSourceV1},
 };
 use wayland_protocols::xdg::shell::client::{
     xdg_popup::{self, XdgPopup},
@@ -40,20 +57,97 @@ use wayland_protocols::wp::viewporter::client::{
 
 use crate::event::{KeyEvent, Modifiers, MouseButton, PointerEvent};
 
+/// Auxiliary Wayland popup surface state for context menus and dropdowns.
 pub struct PopupSurface {
+    /// Wayland surface handle.
     pub surface: WlSurface,
+    /// XDG surface role.
     pub xdg_surface: XdgSurface,
+    /// XDG popup role.
     pub xdg_popup: XdgPopup,
+    /// Viewport for fractional scaling.
     pub viewport: Option<WpViewport>,
+    /// Popup X coordinate relative to anchor.
     pub x: i32,
+    /// Popup Y coordinate relative to anchor.
     pub y: i32,
+    /// Width in logical pixels.
     pub width: u32,
+    /// Height in logical pixels.
     pub height: u32,
+    /// Indicates whether initial configure was acknowledged.
     pub configured: bool,
+    /// Set when compositor dismisses the popup.
     pub is_dismissed: bool,
+    /// Raw window handle for Vulkan surface attachment.
     pub window_handle: RawWindowHandle,
 }
 
+/// Window decoration mode negotiated with the compositor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WindowDecorations {
+    /// Server-side decorations provided by compositor.
+    #[default]
+    ServerSide,
+    /// Client-side decorations rendered by North Toolkit.
+    ClientSide,
+    /// Frameless borderless window.
+    None,
+}
+
+/// Edges and corners for interactive window resizing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ResizeEdge {
+    /// No edge active.
+    #[default]
+    None,
+    /// Top edge.
+    Top,
+    /// Bottom edge.
+    Bottom,
+    /// Left edge.
+    Left,
+    /// Top-left corner.
+    TopLeft,
+    /// Bottom-left corner.
+    BottomLeft,
+    /// Right edge.
+    Right,
+    /// Top-right corner.
+    TopRight,
+    /// Bottom-right corner.
+    BottomRight,
+}
+
+impl ResizeEdge {
+    /// Converts to the Wayland `xdg_toplevel::ResizeEdge` enum.
+    pub fn to_wayland(self) -> xdg_toplevel::ResizeEdge {
+        match self {
+            Self::None => xdg_toplevel::ResizeEdge::None,
+            Self::Top => xdg_toplevel::ResizeEdge::Top,
+            Self::Bottom => xdg_toplevel::ResizeEdge::Bottom,
+            Self::Left => xdg_toplevel::ResizeEdge::Left,
+            Self::TopLeft => xdg_toplevel::ResizeEdge::TopLeft,
+            Self::BottomLeft => xdg_toplevel::ResizeEdge::BottomLeft,
+            Self::Right => xdg_toplevel::ResizeEdge::Right,
+            Self::TopRight => xdg_toplevel::ResizeEdge::TopRight,
+            Self::BottomRight => xdg_toplevel::ResizeEdge::BottomRight,
+        }
+    }
+
+    /// Maps the edge to an appropriate bidirectional resize cursor shape.
+    pub fn cursor_icon(self) -> Option<crate::event::CursorIcon> {
+        match self {
+            Self::None => None,
+            Self::Top | Self::Bottom => Some(crate::event::CursorIcon::NsResize),
+            Self::Left | Self::Right => Some(crate::event::CursorIcon::EwResize),
+            Self::TopLeft | Self::BottomRight => Some(crate::event::CursorIcon::NwseResize),
+            Self::TopRight | Self::BottomLeft => Some(crate::event::CursorIcon::NeswResize),
+        }
+    }
+}
+
+/// Wayland client globals, seats, input queues, and window state.
 pub struct WaylandState {
     pub compositor: Option<WlCompositor>,
     pub shm: Option<WlShm>,
@@ -87,6 +181,29 @@ pub struct WaylandState {
     pub xkb_context: xkbcommon::xkb::Context,
     pub xkb_keymap: Option<xkbcommon::xkb::Keymap>,
     pub xkb_state: Option<xkbcommon::xkb::State>,
+    pub data_device_manager: Option<WlDataDeviceManager>,
+    pub data_device: Option<WlDataDevice>,
+    pub pending_offers: Vec<(WlDataOffer, Vec<String>)>,
+    pub current_data_offer: Option<WlDataOffer>,
+    pub current_data_offer_mimes: Vec<String>,
+    pub clipboard_text: Option<String>,
+    pub data_source: Option<WlDataSource>,
+    pub primary_selection_device_manager: Option<ZwpPrimarySelectionDeviceManagerV1>,
+    pub primary_selection_device: Option<ZwpPrimarySelectionDeviceV1>,
+    pub pending_primary_offers: Vec<(ZwpPrimarySelectionOfferV1, Vec<String>)>,
+    pub current_primary_offer: Option<ZwpPrimarySelectionOfferV1>,
+    pub current_primary_offer_mimes: Vec<String>,
+    pub primary_text: Option<String>,
+    pub primary_source: Option<ZwpPrimarySelectionSourceV1>,
+    pub pending_paste_pipes: Vec<crate::platform::clipboard::PipeReader>,
+    pub paste_events: Vec<(String, bool)>,
+    pub cursor_shape_manager: Option<WpCursorShapeManagerV1>,
+    pub cursor_shape_device: Option<WpCursorShapeDeviceV1>,
+    pub current_cursor_shape: crate::event::CursorIcon,
+    pub pointer_enter_serial: u32,
+    pub is_maximized: bool,
+    pub is_active: bool,
+    pub decoration_mode: WindowDecorations,
 }
 
 impl WaylandState {
@@ -120,25 +237,56 @@ impl WaylandState {
             key_events: Vec::new(),
             resize_requested: None,
             pointer_pos: (0.0, 0.0),
+            is_maximized: false,
+            is_active: true,
+            decoration_mode: WindowDecorations::ServerSide,
             frame_callback: None,
             frame_ready: true,
             xkb_context,
             xkb_keymap: None,
             xkb_state: None,
+            data_device_manager: None,
+            data_device: None,
+            pending_offers: Vec::new(),
+            current_data_offer: None,
+            current_data_offer_mimes: Vec::new(),
+            clipboard_text: None,
+            data_source: None,
+            primary_selection_device_manager: None,
+            primary_selection_device: None,
+            pending_primary_offers: Vec::new(),
+            current_primary_offer: None,
+            current_primary_offer_mimes: Vec::new(),
+            primary_text: None,
+            primary_source: None,
+            pending_paste_pipes: Vec::new(),
+            paste_events: Vec::new(),
+            cursor_shape_manager: None,
+            cursor_shape_device: None,
+            current_cursor_shape: crate::event::CursorIcon::Default,
+            pointer_enter_serial: 0,
         }
     }
 }
 
+/// Native Wayland window handle, client event queue, and connection context.
 pub struct WaylandWindow {
+    /// Connection to the active Wayland display server.
     pub connection: Connection,
+    /// Event queue for draining Wayland protocol events.
     pub event_queue: Option<EventQueue<WaylandState>>,
+    /// Queue handle for dispatching proxy requests.
     pub qh: QueueHandle<WaylandState>,
+    /// Retained Wayland client state.
     pub state: WaylandState,
+    /// Raw display handle for Vulkan surface attachment.
     pub display_handle: RawDisplayHandle,
+    /// Raw window handle for Vulkan surface attachment.
     pub window_handle: RawWindowHandle,
 }
 
 impl WaylandWindow {
+    /// Connects to the Wayland display and creates a configured toplevel XDG window.
     pub fn new(title: &str, width: u32, height: u32) -> Result<Self> {
         let connection = Connection::connect_to_env()
             .context("Failed to connect to Wayland display")?;
@@ -212,6 +360,7 @@ impl WaylandWindow {
         })
     }
 
+    /// Requests a `wl_surface::frame` callback to synchronize rendering with the compositor refresh rate.
     pub fn request_frame(&mut self) {
         if self.state.frame_callback.is_none() {
             if let Some(surface) = &self.state.surface {
@@ -223,6 +372,55 @@ impl WaylandWindow {
         }
     }
 
+    /// Initiates an interactive compositor window move drag.
+    pub fn start_interactive_move(&self) {
+        if let (Some(toplevel), Some(seat)) = (&self.state.xdg_toplevel, &self.state.seat) {
+            toplevel._move(seat, self.state.last_seat_serial);
+        }
+    }
+
+    /// Initiates an interactive compositor window resize from the specified edge.
+    pub fn start_interactive_resize(&self, edge: ResizeEdge) {
+        if let (Some(toplevel), Some(seat)) = (&self.state.xdg_toplevel, &self.state.seat) {
+            toplevel.resize(seat, self.state.last_seat_serial, edge.to_wayland());
+        }
+    }
+
+    /// Toggles the window between maximized and restored states.
+    pub fn toggle_maximize(&mut self) {
+        if let Some(toplevel) = &self.state.xdg_toplevel {
+            if self.state.is_maximized {
+                toplevel.unset_maximized();
+            } else {
+                toplevel.set_maximized();
+            }
+        }
+    }
+
+    /// Minimizes the window to the compositor taskbar or dock.
+    pub fn minimize(&self) {
+        if let Some(toplevel) = &self.state.xdg_toplevel {
+            toplevel.set_minimized();
+        }
+    }
+
+    /// Configures the window decoration mode (CSD vs SSD).
+    pub fn set_decoration_mode(&mut self, mode: WindowDecorations) {
+        self.state.decoration_mode = mode;
+        if let Some(decoration) = &self.state.toplevel_decoration {
+            match mode {
+                WindowDecorations::ClientSide => {
+                    decoration.set_mode(zxdg_toplevel_decoration_v1::Mode::ClientSide);
+                }
+                WindowDecorations::ServerSide => {
+                    decoration.set_mode(zxdg_toplevel_decoration_v1::Mode::ServerSide);
+                }
+                WindowDecorations::None => {}
+            }
+        }
+    }
+
+    /// Opens an auxiliary Wayland popup positioned relative to an anchor rectangle.
     pub fn open_popup(
         &mut self,
         anchor_x: i32,
@@ -302,6 +500,7 @@ impl WaylandWindow {
         Ok(())
     }
 
+    /// Dismisses and frees the active popup surface.
     pub fn dismiss_popup(&mut self) {
         if let Some(popup) = self.state.popup.take() {
             popup.xdg_popup.destroy();
@@ -313,11 +512,94 @@ impl WaylandWindow {
         }
     }
 
+    /// Returns `true` if the mouse pointer is currently hovering over the popup surface.
     pub fn is_pointer_on_popup(&self) -> bool {
         if let Some(popup) = &self.state.popup {
             self.state.pointer_surface.as_ref() == Some(&popup.surface)
         } else {
             false
+        }
+    }
+
+    /// Publishes text to the standard Wayland clipboard data device (`Ctrl+C`).
+    pub fn set_clipboard_text(&mut self, text: String) {
+        self.state.clipboard_text = Some(text);
+        if let Some(mgr) = &self.state.data_device_manager {
+            let source = mgr.create_data_source(&self.qh, ());
+            for &mime in crate::platform::clipboard::UTF8_MIME_TYPES {
+                source.offer(mime.to_string());
+            }
+            if let Some(device) = &self.state.data_device {
+                device.set_selection(Some(&source), self.state.last_seat_serial);
+            }
+            self.state.data_source = Some(source);
+        }
+    }
+
+    /// Publishes text to the Wayland primary selection device (mouse highlight).
+    pub fn set_primary_text(&mut self, text: String) {
+        self.state.primary_text = Some(text);
+        if let Some(mgr) = &self.state.primary_selection_device_manager {
+            let source = mgr.create_source(&self.qh, ());
+            for &mime in crate::platform::clipboard::UTF8_MIME_TYPES {
+                source.offer(mime.to_string());
+            }
+            if let Some(device) = &self.state.primary_selection_device {
+                device.set_selection(Some(&source), self.state.last_seat_serial);
+            }
+            self.state.primary_source = Some(source);
+        }
+    }
+
+    /// Requests asynchronous text paste from either the clipboard or primary selection.
+    pub fn request_paste(&mut self, target: crate::platform::clipboard::SelectionTarget) {
+        match target {
+            crate::platform::clipboard::SelectionTarget::Clipboard => {
+                if let Some(offer) = &self.state.current_data_offer {
+                    if let Some(best_mime) =
+                        crate::platform::clipboard::find_best_utf8_mime(&self.state.current_data_offer_mimes)
+                    {
+                        if let Ok((read_fd, write_fd)) = crate::platform::clipboard::create_nonblocking_pipe() {
+                            offer.receive(best_mime.to_string(), write_fd.as_fd());
+                            drop(write_fd);
+                            self.state.pending_paste_pipes.push(
+                                crate::platform::clipboard::PipeReader::new(read_fd, target),
+                            );
+                        }
+                    }
+                }
+            }
+            crate::platform::clipboard::SelectionTarget::Primary => {
+                if let Some(offer) = &self.state.current_primary_offer {
+                    if let Some(best_mime) =
+                        crate::platform::clipboard::find_best_utf8_mime(&self.state.current_primary_offer_mimes)
+                    {
+                        if let Ok((read_fd, write_fd)) = crate::platform::clipboard::create_nonblocking_pipe() {
+                            offer.receive(best_mime.to_string(), write_fd.as_fd());
+                            drop(write_fd);
+                            self.state.pending_paste_pipes.push(
+                                crate::platform::clipboard::PipeReader::new(read_fd, target),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Updates the server-side mouse cursor shape via `wp_cursor_shape_v1`.
+    pub fn set_cursor_shape(&mut self, icon: crate::event::CursorIcon) {
+        if self.state.current_cursor_shape == icon {
+            return;
+        }
+        self.state.current_cursor_shape = icon;
+        if let Some(device) = &self.state.cursor_shape_device {
+            if self.state.pointer_enter_serial > 0 {
+                device.set_shape(
+                    self.state.pointer_enter_serial,
+                    icon.to_wayland_shape(),
+                );
+            }
         }
     }
 }
@@ -390,7 +672,28 @@ impl Dispatch<WlRegistry, ()> for WaylandState {
                     state.wm_base = Some(registry.bind::<XdgWmBase, _, _>(name, 1, qh, ()));
                 }
                 "wl_seat" => {
-                    state.seat = Some(registry.bind::<WlSeat, _, _>(name, version.min(5), qh, ()));
+                    let seat = registry.bind::<WlSeat, _, _>(name, version.min(5), qh, ());
+                    if let Some(mgr) = &state.data_device_manager {
+                        state.data_device = Some(mgr.get_data_device(&seat, qh, ()));
+                    }
+                    if let Some(mgr) = &state.primary_selection_device_manager {
+                        state.primary_selection_device = Some(mgr.get_device(&seat, qh, ()));
+                    }
+                    state.seat = Some(seat);
+                }
+                "wl_data_device_manager" => {
+                    let mgr = registry.bind::<WlDataDeviceManager, _, _>(name, version.min(3), qh, ());
+                    if let Some(seat) = &state.seat {
+                        state.data_device = Some(mgr.get_data_device(seat, qh, ()));
+                    }
+                    state.data_device_manager = Some(mgr);
+                }
+                "zwp_primary_selection_device_manager_v1" => {
+                    let mgr = registry.bind::<ZwpPrimarySelectionDeviceManagerV1, _, _>(name, 1, qh, ());
+                    if let Some(seat) = &state.seat {
+                        state.primary_selection_device = Some(mgr.get_device(seat, qh, ()));
+                    }
+                    state.primary_selection_device_manager = Some(mgr);
                 }
                 "zxdg_decoration_manager_v1" => {
                     state.decoration_manager = Some(registry.bind::<ZxdgDecorationManagerV1, _, _>(name, 1, qh, ()));
@@ -400,6 +703,13 @@ impl Dispatch<WlRegistry, ()> for WaylandState {
                 }
                 "wp_viewporter" => {
                     state.viewporter = Some(registry.bind::<WpViewporter, _, _>(name, 1, qh, ()));
+                }
+                "wp_cursor_shape_manager_v1" => {
+                    let mgr = registry.bind::<WpCursorShapeManagerV1, _, _>(name, version.min(1), qh, ());
+                    if let Some(pointer) = &state.pointer {
+                        state.cursor_shape_device = Some(mgr.get_pointer(pointer, qh, ()));
+                    }
+                    state.cursor_shape_manager = Some(mgr);
                 }
                 _ => {}
             }
@@ -458,7 +768,20 @@ impl Dispatch<XdgToplevel, ()> for WaylandState {
         _: &QueueHandle<Self>,
     ) {
         match event {
-            xdg_toplevel::Event::Configure { width, height, .. } => {
+            xdg_toplevel::Event::Configure { width, height, states } => {
+                let mut is_maximized = false;
+                let mut is_active = false;
+                for chunk in states.chunks_exact(4) {
+                    let val = u32::from_ne_bytes(chunk.try_into().unwrap());
+                    match val {
+                        1 => is_maximized = true,
+                        4 => is_active = true,
+                        _ => {}
+                    }
+                }
+                state.is_maximized = is_maximized;
+                state.is_active = is_active;
+
                 if width > 0 && height > 0 {
                     let (w, h) = (width as u32, height as u32);
                     if (w, h) != (state.width, state.height) {
@@ -491,7 +814,11 @@ impl Dispatch<WlSeat, ()> for WaylandState {
         if let wl_seat::Event::Capabilities { capabilities } = event {
             let caps = wl_seat::Capability::from_bits_truncate(capabilities.into());
             if caps.contains(wl_seat::Capability::Pointer) && state.pointer.is_none() {
-                state.pointer = Some(seat.get_pointer(qh, ()));
+                let pointer = seat.get_pointer(qh, ());
+                if let Some(mgr) = &state.cursor_shape_manager {
+                    state.cursor_shape_device = Some(mgr.get_pointer(&pointer, qh, ()));
+                }
+                state.pointer = Some(pointer);
             }
             if caps.contains(wl_seat::Capability::Keyboard) && state.keyboard.is_none() {
                 state.keyboard = Some(seat.get_keyboard(qh, ()));
@@ -519,8 +846,12 @@ impl Dispatch<WlPointer, ()> for WaylandState {
                 let px = surface_x as f32;
                 let py = surface_y as f32;
                 state.last_seat_serial = serial;
+                state.pointer_enter_serial = serial;
                 state.pointer_surface = Some(surface);
                 state.pointer_pos = (px, py);
+                if let Some(device) = &state.cursor_shape_device {
+                    device.set_shape(serial, state.current_cursor_shape.to_wayland_shape());
+                }
                 state.pointer_events.push(PointerEvent::Move { x: px, y: py });
             }
             wl_pointer::Event::Leave { surface, .. } => {
@@ -772,13 +1103,26 @@ impl Dispatch<ZxdgDecorationManagerV1, ()> for WaylandState {
 
 impl Dispatch<ZxdgToplevelDecorationV1, ()> for WaylandState {
     fn event(
-        _: &mut Self,
+        state: &mut Self,
         _: &ZxdgToplevelDecorationV1,
-        _: zxdg_toplevel_decoration_v1::Event,
+        event: zxdg_toplevel_decoration_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if let zxdg_toplevel_decoration_v1::Event::Configure { mode } = event {
+            if let wayland_client::WEnum::Value(m) = mode {
+                match m {
+                    zxdg_toplevel_decoration_v1::Mode::ClientSide => {
+                        state.decoration_mode = WindowDecorations::ClientSide;
+                    }
+                    zxdg_toplevel_decoration_v1::Mode::ServerSide => {
+                        state.decoration_mode = WindowDecorations::ServerSide;
+                    }
+                    _ => {}
+                }
+            }
+        }
     }
 }
 
@@ -830,6 +1174,224 @@ impl Dispatch<WpViewport, ()> for WaylandState {
         _: &mut Self,
         _: &WpViewport,
         _: wp_viewport::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WlDataDeviceManager, ()> for WaylandState {
+    fn event(
+        _: &mut Self,
+        _: &WlDataDeviceManager,
+        _: wl_data_device_manager::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WlDataDevice, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &WlDataDevice,
+        event: wl_data_device::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_device::Event::DataOffer { id } => {
+                state.pending_offers.push((id, Vec::new()));
+            }
+            wl_data_device::Event::Selection { id } => {
+                if let Some(offer) = id {
+                    let mimes = if let Some(pos) = state.pending_offers.iter().position(|(o, _)| *o == offer) {
+                        state.pending_offers.remove(pos).1
+                    } else {
+                        Vec::new()
+                    };
+                    state.current_data_offer = Some(offer);
+                    state.current_data_offer_mimes = mimes;
+                } else {
+                    state.current_data_offer = None;
+                    state.current_data_offer_mimes.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(WaylandState, WlDataDevice, [
+        0 => (WlDataOffer, ()),
+    ]);
+}
+
+impl Dispatch<WlDataOffer, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        offer: &WlDataOffer,
+        event: wl_data_offer::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_offer::Event::Offer { mime_type } => {
+                if let Some((_, mimes)) = state.pending_offers.iter_mut().find(|(o, _)| o == offer) {
+                    mimes.push(mime_type.clone());
+                }
+                if let Some(curr) = &state.current_data_offer {
+                    if curr == offer {
+                        state.current_data_offer_mimes.push(mime_type);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WlDataSource, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &WlDataSource,
+        event: wl_data_source::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            wl_data_source::Event::Send { mime_type: _, fd } => {
+                if let Some(text) = &state.clipboard_text {
+                    let _ = crate::platform::clipboard::write_text_to_pipe(&fd, text);
+                }
+            }
+            wl_data_source::Event::Cancelled => {
+                state.data_source = None;
+                state.clipboard_text = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwpPrimarySelectionDeviceManagerV1, ()> for WaylandState {
+    fn event(
+        _: &mut Self,
+        _: &ZwpPrimarySelectionDeviceManagerV1,
+        _: zwp_primary_selection_device_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZwpPrimarySelectionDeviceV1, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &ZwpPrimarySelectionDeviceV1,
+        event: zwp_primary_selection_device_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_primary_selection_device_v1::Event::DataOffer { offer } => {
+                state.pending_primary_offers.push((offer, Vec::new()));
+            }
+            zwp_primary_selection_device_v1::Event::Selection { id } => {
+                if let Some(offer) = id {
+                    let mimes = if let Some(pos) = state.pending_primary_offers.iter().position(|(o, _)| *o == offer) {
+                        state.pending_primary_offers.remove(pos).1
+                    } else {
+                        Vec::new()
+                    };
+                    state.current_primary_offer = Some(offer);
+                    state.current_primary_offer_mimes = mimes;
+                } else {
+                    state.current_primary_offer = None;
+                    state.current_primary_offer_mimes.clear();
+                }
+            }
+            _ => {}
+        }
+    }
+
+    wayland_client::event_created_child!(WaylandState, ZwpPrimarySelectionDeviceV1, [
+        0 => (ZwpPrimarySelectionOfferV1, ()),
+    ]);
+}
+
+impl Dispatch<ZwpPrimarySelectionOfferV1, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        offer: &ZwpPrimarySelectionOfferV1,
+        event: zwp_primary_selection_offer_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_primary_selection_offer_v1::Event::Offer { mime_type } => {
+                if let Some((_, mimes)) = state.pending_primary_offers.iter_mut().find(|(o, _)| o == offer) {
+                    mimes.push(mime_type.clone());
+                }
+                if let Some(curr) = &state.current_primary_offer {
+                    if curr == offer {
+                        state.current_primary_offer_mimes.push(mime_type);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwpPrimarySelectionSourceV1, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &ZwpPrimarySelectionSourceV1,
+        event: zwp_primary_selection_source_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_primary_selection_source_v1::Event::Send { mime_type: _, fd } => {
+                if let Some(text) = &state.primary_text {
+                    let _ = crate::platform::clipboard::write_text_to_pipe(&fd, text);
+                }
+            }
+            zwp_primary_selection_source_v1::Event::Cancelled => {
+                state.primary_source = None;
+                state.primary_text = None;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<WpCursorShapeManagerV1, ()> for WaylandState {
+    fn event(
+        _: &mut Self,
+        _: &WpCursorShapeManagerV1,
+        _: wp_cursor_shape_manager_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<WpCursorShapeDeviceV1, ()> for WaylandState {
+    fn event(
+        _: &mut Self,
+        _: &WpCursorShapeDeviceV1,
+        _: wp_cursor_shape_device_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,

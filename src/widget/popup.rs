@@ -1,23 +1,34 @@
+//! Popup menus and dropdown selector widgets with Wayland xdg_popup integration.
+
 use std::any::Any;
 
+use super::icon::IconName;
 use super::state::Property;
 use super::tree::Widget;
 use crate::event::{EventResponse, KeyEvent, MouseButton, PointerEvent};
 use crate::layout::{AlignItems, Dimension, EdgeInsets, FlexDirection, FlexStyle, LayoutRect, MeasureFunc};
+use crate::render::vector::{StrokeStyle, VectorAtlas, VectorPath, VectorRasterizer};
 use crate::render::{Border, CornerRadii, GlyphAtlas, RenderPrimitive};
 use crate::text::{emit_text_glyphs, GlyphRasterizer, TextShaper};
 use crate::theme::Theme;
 
+/// Individual entry in a popup menu.
 pub enum MenuItem {
+    /// Clickable action item with label, optional shortcut display, and trigger callback.
     Action {
+        /// Text label of the menu item.
         label: String,
+        /// Optional keyboard shortcut label (e.g. "Ctrl+O").
         shortcut: Option<String>,
+        /// Callback executed when this item is selected.
         on_select: Box<dyn FnMut()>,
     },
+    /// Visual horizontal divider between menu item groups.
     Separator,
 }
 
 impl MenuItem {
+    /// Creates a clickable menu action with a label and trigger callback.
     pub fn action<S: Into<String>, F: FnMut() + 'static>(label: S, on_select: F) -> Self {
         Self::Action {
             label: label.into(),
@@ -26,6 +37,7 @@ impl MenuItem {
         }
     }
 
+    /// Creates a clickable menu action with a label, keyboard shortcut hint, and trigger callback.
     pub fn action_with_shortcut<S: Into<String>, K: Into<String>, F: FnMut() + 'static>(
         label: S,
         shortcut: K,
@@ -38,14 +50,17 @@ impl MenuItem {
         }
     }
 
+    /// Creates a horizontal separator line item.
     pub fn separator() -> Self {
         Self::Separator
     }
 
+    /// Returns `true` if this item is a visual separator.
     pub fn is_separator(&self) -> bool {
         matches!(self, Self::Separator)
     }
 
+    /// Returns the label of the action item, or `None` if it is a separator.
     pub fn label(&self) -> Option<&str> {
         match self {
             Self::Action { label, .. } => Some(label),
@@ -54,21 +69,33 @@ impl MenuItem {
     }
 }
 
+/// Floating context menu widget displaying a vertical list of menu items.
 pub struct PopupMenu {
+    /// List of menu items and separators.
     pub items: Vec<MenuItem>,
+    /// Font size in logical points.
     pub font_size: f32,
+    /// Flexbox layout style.
     pub style: FlexStyle,
+    /// Index of the currently hovered item.
     pub hovered_index: Option<usize>,
+    /// Index of the selected item when dismissed.
     pub selected_index: Option<usize>,
+    /// Whether the popup menu has been dismissed.
     pub is_dismissed: bool,
 }
 
 impl PopupMenu {
+    /// Default height of an action item in logical points.
     pub const ITEM_HEIGHT: f32 = 30.0;
+    /// Default height of a separator line in logical points.
     pub const SEPARATOR_HEIGHT: f32 = 9.0;
+    /// Vertical padding inside the menu container.
     pub const PADDING_V: f32 = 6.0;
+    /// Horizontal padding inside the menu container.
     pub const PADDING_H: f32 = 6.0;
 
+    /// Creates a new popup menu widget with the provided items.
     pub fn new(items: Vec<MenuItem>) -> Self {
         Self {
             items,
@@ -85,11 +112,13 @@ impl PopupMenu {
         }
     }
 
+    /// Sets the font size for item labels and shortcuts.
     pub fn with_font_size(mut self, size: f32) -> Self {
         self.font_size = size;
         self
     }
 
+    /// Calculates total menu height including padding and item heights.
     pub fn total_height(&self) -> f32 {
         let items_h: f32 = self
             .items
@@ -102,6 +131,7 @@ impl PopupMenu {
         items_h + Self::PADDING_V * 2.0
     }
 
+    /// Resolves which menu item index contains the given y coordinate.
     pub fn item_at_y(&self, y: f32, rect: LayoutRect) -> Option<usize> {
         let mut curr_y = rect.y + Self::PADDING_V;
         for (i, item) in self.items.iter().enumerate() {
@@ -117,6 +147,7 @@ impl PopupMenu {
         None
     }
 
+    /// Computes the layout rectangle of the specified item index within the menu bounds.
     pub fn item_rect(&self, index: usize, rect: LayoutRect) -> LayoutRect {
         let mut curr_y = rect.y + Self::PADDING_V;
         for (i, item) in self.items.iter().enumerate() {
@@ -137,6 +168,7 @@ impl PopupMenu {
         LayoutRect::ZERO
     }
 
+    /// Selects the next non-separator action item.
     pub fn select_next(&mut self) {
         let count = self.items.len();
         if count == 0 {
@@ -152,6 +184,7 @@ impl PopupMenu {
         }
     }
 
+    /// Selects the previous non-separator action item.
     pub fn select_prev(&mut self) {
         let count = self.items.len();
         if count == 0 {
@@ -170,6 +203,7 @@ impl PopupMenu {
         }
     }
 
+    /// Triggers the callback of the currently hovered action item and flags the menu as dismissed.
     pub fn trigger_hovered(&mut self) -> bool {
         if let Some(idx) = self.hovered_index {
             if let Some(MenuItem::Action { on_select, .. }) = self.items.get_mut(idx) {
@@ -265,6 +299,7 @@ impl Widget for PopupMenu {
         atlas: &mut GlyphAtlas,
         rasterizer: &GlyphRasterizer,
         shaper: &TextShaper,
+        _vector_atlas: &mut VectorAtlas,
         scale: f32,
     ) -> Vec<RenderPrimitive> {
         let mut prims = Vec::new();
@@ -378,6 +413,10 @@ impl Widget for PopupMenu {
         prims
     }
 
+    fn cursor_icon_at(&self, _rel_x: f32, _rel_y: f32) -> crate::event::CursorIcon {
+        crate::event::CursorIcon::Pointer
+    }
+
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -387,19 +426,30 @@ impl Widget for PopupMenu {
     }
 }
 
+/// Single-selection dropdown selector widget that spawns a popup menu when activated.
 pub struct Dropdown<T> {
+    /// Available selection options.
     pub options: Vec<T>,
+    /// Reactive index of the currently selected option.
     pub selected: Property<usize>,
+    /// Font size for label text in points.
     pub font_size: f32,
+    /// Flexbox layout style.
     pub style: FlexStyle,
+    /// Whether the dropdown trigger is currently hovered by a pointer.
     pub is_hovered: bool,
+    /// Whether the dropdown trigger currently has keyboard focus.
     pub is_focused: bool,
+    /// Whether the popup menu is currently open.
     pub is_open: bool,
+    /// Flag requesting the runtime to spawn a popup surface.
     pub request_popup: bool,
+    /// Callback invoked when an option is selected.
     pub on_select: Option<Box<dyn FnMut(usize, T)>>,
 }
 
 impl<T: Clone + ToString + 'static> Dropdown<T> {
+    /// Creates a new dropdown widget with the provided options list.
     pub fn new(options: Vec<T>) -> Self {
         Self {
             options,
@@ -421,33 +471,39 @@ impl<T: Clone + ToString + 'static> Dropdown<T> {
         }
     }
 
+    /// Sets the initially selected option index.
     pub fn with_selected(mut self, index: usize) -> Self {
         let max_idx = self.options.len().saturating_sub(1);
         self.selected.set(index.min(max_idx));
         self
     }
 
+    /// Sets the width of the dropdown trigger widget.
     pub fn with_width(mut self, width: f32) -> Self {
         self.style.width = Dimension::Points(width);
         self
     }
 
+    /// Attaches a selection change callback handler.
     pub fn on_select<F: FnMut(usize, T) + 'static>(mut self, cb: F) -> Self {
         self.on_select = Some(Box::new(cb));
         self
     }
 
+    /// Returns a clone of the currently selected value.
     pub fn selected_value(&self) -> Option<T> {
         let idx = *self.selected.get();
         self.options.get(idx).cloned()
     }
 
+    /// Returns the string representation of the currently selected option.
     pub fn selected_label(&self) -> String {
         self.selected_value()
             .map(|v| v.to_string())
             .unwrap_or_default()
     }
 
+    /// Selects the option at index `idx` and notifies the `on_select` callback.
     pub fn select_index(&mut self, idx: usize) {
         if idx < self.options.len() {
             self.selected.set(idx);
@@ -459,6 +515,7 @@ impl<T: Clone + ToString + 'static> Dropdown<T> {
         self.is_open = false;
     }
 
+    /// Constructs a `PopupMenu` containing all dropdown options.
     pub fn build_popup_menu(&self) -> PopupMenu {
         let mut items = Vec::with_capacity(self.options.len());
         for opt in &self.options {
@@ -542,6 +599,7 @@ impl<T: Clone + ToString + 'static> Widget for Dropdown<T> {
         atlas: &mut GlyphAtlas,
         rasterizer: &GlyphRasterizer,
         shaper: &TextShaper,
+        vector_atlas: &mut VectorAtlas,
         scale: f32,
     ) -> Vec<RenderPrimitive> {
         let mut prims = Vec::new();
@@ -573,10 +631,12 @@ impl<T: Clone + ToString + 'static> Widget for Dropdown<T> {
         ));
 
         // Draw selected text
+        let center_y = rect.y + rect.height * 0.5;
         let label = self.selected_label();
         let shaped = shaper.shape(&label, self.font_size);
         let text_x = rect.x + self.style.padding.left;
-        let baseline_y = rect.y + (rect.height - shaped.height) / 2.0 + shaped.ascent;
+        let cap_height = self.font_size * 0.70;
+        let baseline_y = center_y + cap_height * 0.5;
 
         emit_text_glyphs(
             &shaped,
@@ -590,24 +650,54 @@ impl<T: Clone + ToString + 'static> Widget for Dropdown<T> {
             &mut prims,
         );
 
-        // Draw chevron indicator (▼ character or glyph)
-        let chevron_shaped = shaper.shape("▼", self.font_size * 0.7);
-        let chevron_x = rect.x + rect.width - chevron_shaped.width - self.style.padding.right;
-        let chevron_baseline = rect.y + (rect.height - chevron_shaped.height) / 2.0 + chevron_shaped.ascent;
+        // Draw vector chevron indicator
+        let chevron_name = if self.is_open {
+            IconName::ChevronUp
+        } else {
+            IconName::ChevronDown
+        };
+        let chevron_size = 14.0;
+        let chevron_x = rect.x + rect.width - chevron_size - self.style.padding.right;
+        let chevron_y = center_y - chevron_size * 0.5;
+        let phys_size = ((chevron_size * scale).round() as u32).max(1);
+        let stroke_w = (2.0 * (phys_size as f32 / 24.0)).max(1.3);
 
-        emit_text_glyphs(
-            &chevron_shaped,
-            chevron_x,
-            chevron_baseline,
-            self.font_size * 0.7,
-            theme.colors.text_secondary,
-            scale,
-            atlas,
-            rasterizer,
-            &mut prims,
-        );
+        let uv_rect = vector_atlas.get_or_insert(chevron_name as u64, phys_size, phys_size, || {
+            let path = VectorPath::parse_svg(chevron_name.svg_path()).with_view_box(0.0, 0.0, 24.0, 24.0);
+            VectorRasterizer::rasterize(
+                &path,
+                phys_size,
+                phys_size,
+                None,
+                Some(StrokeStyle {
+                    color: [1.0, 1.0, 1.0, 1.0],
+                    width: stroke_w,
+                    ..Default::default()
+                }),
+            )
+        });
+
+        if let Some(uv) = uv_rect {
+            prims.push(RenderPrimitive::Rect {
+                rect: [
+                    chevron_x * scale,
+                    chevron_y * scale,
+                    chevron_size * scale,
+                    chevron_size * scale,
+                ],
+                color: theme.colors.text_secondary,
+                radii: CornerRadii::all(0.0),
+                border: None,
+                uv_rect: uv,
+                use_texture: true,
+            });
+        }
 
         prims
+    }
+
+    fn cursor_icon_at(&self, _rel_x: f32, _rel_y: f32) -> crate::event::CursorIcon {
+        crate::event::CursorIcon::Pointer
     }
 
     fn as_any(&self) -> &dyn Any {

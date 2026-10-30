@@ -1,16 +1,24 @@
+//! Flat widget arena, node hierarchy, event bubbling, hit testing, and overlay coordination.
+
 use std::any::Any;
 
-use crate::event::{EventDispatcher, EventResponse, KeyEvent, PointerEvent, WidgetId};
+use crate::event::{
+    CursorIcon, EventDispatcher, EventResponse, KeyEvent, MouseButton, PointerEvent, WidgetId,
+};
 use crate::layout::{FlexStyle, LayoutEngine, LayoutNodeId, LayoutRect, MeasureFunc};
-use crate::render::{GlyphAtlas, RenderPrimitive};
+use crate::render::{Border, CornerRadii, GlyphAtlas, RenderPrimitive, VectorAtlas};
 use crate::text::{GlyphRasterizer, TextShaper};
 use crate::theme::Theme;
 
+/// The foundational retained widget trait implemented by all toolkit UI elements.
 pub trait Widget: Any {
+    /// Returns the flexbox style configuration for layout computation.
     fn layout_style(&self) -> FlexStyle;
+    /// Optional intrinsic measurement function for text or custom shapes.
     fn measure(&self, _shaper: &TextShaper) -> Option<MeasureFunc> {
         None
     }
+    /// Emits visual primitives rendered before child widgets (backgrounds, borders).
     fn paint_before(
         &self,
         rect: LayoutRect,
@@ -18,10 +26,12 @@ pub trait Widget: Any {
         atlas: &mut GlyphAtlas,
         rasterizer: &GlyphRasterizer,
         shaper: &TextShaper,
+        vector_atlas: &mut VectorAtlas,
         scale: f32,
     ) -> Vec<RenderPrimitive> {
-        self.paint(rect, theme, atlas, rasterizer, shaper, scale)
+        self.paint(rect, theme, atlas, rasterizer, shaper, vector_atlas, scale)
     }
+    /// Emits visual primitives rendered after child widgets (scrollbars, foregrounds).
     fn paint_after(
         &self,
         _rect: LayoutRect,
@@ -29,10 +39,12 @@ pub trait Widget: Any {
         _atlas: &mut GlyphAtlas,
         _rasterizer: &GlyphRasterizer,
         _shaper: &TextShaper,
+        _vector_atlas: &mut VectorAtlas,
         _scale: f32,
     ) -> Vec<RenderPrimitive> {
         Vec::new()
     }
+    /// Standard paint method for leaf widgets.
     fn paint(
         &self,
         _rect: LayoutRect,
@@ -40,72 +52,241 @@ pub trait Widget: Any {
         _atlas: &mut GlyphAtlas,
         _rasterizer: &GlyphRasterizer,
         _shaper: &TextShaper,
+        _vector_atlas: &mut VectorAtlas,
         _scale: f32,
     ) -> Vec<RenderPrimitive> {
         Vec::new()
     }
+    /// Scroll offset `(scroll_x, scroll_y)` applied to child widgets.
     fn scroll_offset(&self) -> (f32, f32) {
         (0.0, 0.0)
     }
+    /// Returns `true` if this widget accepts keyboard focus via Tab navigation.
     fn is_focusable(&self) -> bool {
         false
     }
+    /// Handles pointer events (move, down, up, scroll).
     fn on_pointer_event(&mut self, _event: &PointerEvent, _rect: LayoutRect) -> EventResponse {
         EventResponse::Ignored
     }
+    /// Handles keyboard events when this widget has active focus.
     fn on_key_event(&mut self, _event: &KeyEvent) -> EventResponse {
         EventResponse::Ignored
     }
+    /// Called when the widget gains or loses keyboard focus.
     fn on_focus_change(&mut self, _focused: bool) {}
+    /// Advances internal widget animations. Returns `true` if a repaint is required.
     fn tick_animation(&mut self, _delta_ms: f32) -> bool {
         false
     }
+    /// Takes any pending popup menu request triggered by this widget.
     fn take_popup_request(&mut self, _rect: LayoutRect) -> Option<super::popup::PopupMenu> {
         None
     }
+    /// Called when an active popup menu initiated by this widget has closed.
     fn on_popup_closed(&mut self, _selected_index: Option<usize>) {}
+    /// Takes any pending clipboard action (copy or paste request).
+    fn take_clipboard_action(&mut self) -> Option<ClipboardAction> {
+        None
+    }
+    /// Takes any pending client-side window management action.
+    fn take_window_action(&mut self) -> Option<WindowAction> {
+        None
+    }
+    /// Handles incoming text pasted from the clipboard or primary selection.
+    fn on_paste(&mut self, _text: &str, _is_primary: bool) {}
+    /// Returns the cursor icon shape at relative widget coordinates.
+    fn cursor_icon_at(&self, _rel_x: f32, _rel_y: f32) -> CursorIcon {
+        CursorIcon::Default
+    }
+    /// Returns tooltip configuration if hovered.
+    fn tooltip(&self) -> Option<super::tooltip::Tooltip> {
+        None
+    }
+    /// Downcasts to `&dyn Any`.
     fn as_any(&self) -> &dyn Any;
+    /// Downcasts to `&mut dyn Any`.
     fn as_any_mut(&mut self) -> &mut dyn Any;
 }
 
+/// Window management action requested by a CSD titlebar or edge hit-test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowAction {
+    /// Interactive window move drag.
+    InteractiveMove,
+    /// Interactive window resize from edge.
+    InteractiveResize(crate::platform::ResizeEdge),
+    /// Minimize window.
+    Minimize,
+    /// Toggle maximize and restore.
+    ToggleMaximize,
+    /// Close window.
+    Close,
+}
+
+/// Performs hit testing against the 4 perimeter edges and corners for interactive window resizing.
+pub fn hit_test_window_edge(
+    px: f32,
+    py: f32,
+    win_w: f32,
+    win_h: f32,
+    margin: f32,
+) -> crate::platform::ResizeEdge {
+    let on_left = px >= 0.0 && px < margin;
+    let on_right = px <= win_w && px > win_w - margin;
+    let on_top = py >= 0.0 && py < margin;
+    let on_bottom = py <= win_h && py > win_h - margin;
+
+    if on_top && on_left {
+        crate::platform::ResizeEdge::TopLeft
+    } else if on_top && on_right {
+        crate::platform::ResizeEdge::TopRight
+    } else if on_bottom && on_left {
+        crate::platform::ResizeEdge::BottomLeft
+    } else if on_bottom && on_right {
+        crate::platform::ResizeEdge::BottomRight
+    } else if on_top {
+        crate::platform::ResizeEdge::Top
+    } else if on_bottom {
+        crate::platform::ResizeEdge::Bottom
+    } else if on_left {
+        crate::platform::ResizeEdge::Left
+    } else if on_right {
+        crate::platform::ResizeEdge::Right
+    } else {
+        crate::platform::ResizeEdge::None
+    }
+}
+
+/// Action requesting clipboard read or write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardAction {
+    /// Write text to standard clipboard.
+    SetClipboard(String),
+    /// Write text to primary selection.
+    SetPrimary(String),
+    /// Read text asynchronously from specified target buffer.
+    RequestPaste(crate::platform::clipboard::SelectionTarget),
+}
+
+/// A request to open a popup menu anchored to a specific layout rect.
 pub struct PopupRequest {
+    /// Anchor rectangle in logical coordinates.
     pub anchor_rect: LayoutRect,
+    /// Popup menu model and items.
     pub menu: super::popup::PopupMenu,
+    /// Widget that initiated this popup.
     pub source_widget: WidgetId,
 }
 
+/// Node within the flat `WidgetTree` arena holding a boxed widget and its layout node reference.
 pub struct WidgetNode {
+    /// The boxed widget instance.
     pub widget: Box<dyn Widget>,
+    /// Child widget identifiers in document order.
     pub children: Vec<WidgetId>,
+    /// Parent widget identifier.
     pub parent: Option<WidgetId>,
+    /// Associated node in the flexbox `LayoutEngine`.
     pub layout_node: LayoutNodeId,
+    /// Whether this node requires style/measure resynchronization.
     pub dirty: bool,
 }
 
+/// The flat arena storing the retained widget hierarchy, active modal, and tooltips.
 pub struct WidgetTree {
     pub nodes: Vec<Option<WidgetNode>>,
     root: Option<WidgetId>,
     pub dirty: bool,
+    pub pending_clipboard_actions: Vec<ClipboardAction>,
+    pub pending_window_actions: Vec<WindowAction>,
+    pub csd_enabled: bool,
+    pub is_maximized: bool,
+    pub tooltip_manager: super::tooltip::TooltipManager,
+    pub active_modal: Option<super::dialog::ActiveModal>,
+    pub modal_handle: super::dialog::ModalHandle,
 }
 
 impl WidgetTree {
+    /// Creates a new empty widget tree.
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
             root: None,
             dirty: true,
+            pending_clipboard_actions: Vec::new(),
+            pending_window_actions: Vec::new(),
+            csd_enabled: false,
+            is_maximized: false,
+            tooltip_manager: super::tooltip::TooltipManager::new(),
+            active_modal: None,
+            modal_handle: super::dialog::ModalHandle::new(),
         }
     }
 
+    /// Enqueues a window management action (minimize, maximize, move, resize).
+    pub fn queue_window_action(&mut self, action: WindowAction) {
+        self.pending_window_actions.push(action);
+    }
+
+    /// Takes and clears all pending window management actions.
+    pub fn take_window_actions(&mut self) -> Vec<WindowAction> {
+        std::mem::take(&mut self.pending_window_actions)
+    }
+
+    /// Enables or disables client-side decorations (CSD) edge hit-testing.
+    pub fn set_csd_enabled(&mut self, enabled: bool) {
+        self.csd_enabled = enabled;
+    }
+
+    /// Updates window maximized state.
+    pub fn set_maximized(&mut self, maximized: bool) {
+        self.is_maximized = maximized;
+    }
+
+    /// Clones the thread-safe `ModalHandle` for dispatching modal dialogs.
+    pub fn modal_handle(&self) -> super::dialog::ModalHandle {
+        self.modal_handle.clone()
+    }
+
+    /// Checks and mounts any pending modal dialog opened via `ModalHandle`.
+    pub fn check_pending_modal(&mut self) {
+        if let Some(dialog) = self.modal_handle.take() {
+            self.open_modal(dialog);
+        }
+    }
+
+    /// Mounts and opens an active modal dialog.
+    pub fn open_modal(&mut self, dialog: super::dialog::Dialog) {
+        self.active_modal = Some(super::dialog::ActiveModal::new(dialog));
+        self.dirty = true;
+    }
+
+    /// Closes the active modal dialog with the given response.
+    pub fn close_modal(&mut self, response: super::dialog::DialogResponse) {
+        if let Some(modal) = &mut self.active_modal {
+            modal.close(response);
+            self.dirty = true;
+        }
+    }
+
+    /// Returns `true` if a modal dialog is currently open.
+    pub fn is_modal_active(&self) -> bool {
+        self.active_modal.is_some()
+    }
+
+    /// Returns the root widget identifier, if set.
     pub fn root(&self) -> Option<WidgetId> {
         self.root
     }
 
+    /// Sets the root widget of the tree.
     pub fn set_root(&mut self, id: WidgetId) {
         self.root = Some(id);
         self.dirty = true;
     }
 
+    /// Adds a widget to the tree arena, linking it to the flexbox `LayoutEngine`.
     pub fn add_widget(
         &mut self,
         engine: &mut LayoutEngine,
@@ -153,6 +334,7 @@ impl WidgetTree {
         widget_id
     }
 
+    /// Downcasts and returns a reference to widget `T` at `id`.
     pub fn get_widget<T: Widget>(&self, id: WidgetId) -> Option<&T> {
         self.nodes
             .get(id.0)
@@ -160,6 +342,7 @@ impl WidgetTree {
             .and_then(|n| n.widget.as_any().downcast_ref::<T>())
     }
 
+    /// Downcasts and returns a mutable reference to widget `T` at `id`.
     pub fn get_widget_mut<T: Widget>(&mut self, id: WidgetId) -> Option<&mut T> {
         self.nodes
             .get_mut(id.0)
@@ -167,6 +350,7 @@ impl WidgetTree {
             .and_then(|n| n.widget.as_any_mut().downcast_mut::<T>())
     }
 
+    /// Marks a specific widget as requiring layout update.
     pub fn mark_dirty(&mut self, id: WidgetId) {
         if let Some(Some(node)) = self.nodes.get_mut(id.0) {
             node.dirty = true;
@@ -174,10 +358,12 @@ impl WidgetTree {
         self.dirty = true;
     }
 
+    /// Returns `true` if the tree or any child node requires relayout or repaint.
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
 
+    /// Synchronizes flex styles and intrinsic measurements to the flexbox `LayoutEngine`.
     pub fn sync_layout(&mut self, engine: &mut LayoutEngine, shaper: &TextShaper) {
         for node in self.nodes.iter_mut().flatten() {
             if node.dirty {
@@ -191,10 +377,24 @@ impl WidgetTree {
         self.dirty = false;
     }
 
+    /// Advances running animations across all widgets and overlays. Returns `true` if repaint is needed.
     pub fn tick_animations(&mut self, delta_ms: f32) -> bool {
+        self.check_pending_modal();
         let mut needs_repaint = false;
         for node in self.nodes.iter_mut().flatten() {
             if node.widget.tick_animation(delta_ms) {
+                needs_repaint = true;
+            }
+        }
+        if self.tooltip_manager.tick(delta_ms) {
+            needs_repaint = true;
+        }
+        if let Some(modal) = &mut self.active_modal {
+            if modal.tick(delta_ms) {
+                needs_repaint = true;
+            }
+            if modal.is_closed() {
+                self.active_modal = None;
                 needs_repaint = true;
             }
         }
@@ -204,6 +404,7 @@ impl WidgetTree {
         needs_repaint
     }
 
+    /// Performs reverse depth-order hit testing against computed widget rectangles.
     pub fn hit_test(&self, engine: &LayoutEngine, px: f32, py: f32) -> Option<WidgetId> {
         let root = self.root?;
         self.hit_test_recursive(root, engine, px, py, (0.0, 0.0))
@@ -242,13 +443,36 @@ impl WidgetTree {
         Some(current)
     }
 
+    /// Dispatches a pointer event through the tree with hit testing, hover tracking, and bubbling.
     pub fn dispatch_pointer_event(
         &mut self,
         dispatcher: &mut EventDispatcher,
         engine: &LayoutEngine,
         event: &PointerEvent,
     ) -> EventResponse {
+        self.check_pending_modal();
         let (px, py) = event.position();
+        dispatcher.mouse_pos = (px, py);
+
+        if let Some(modal) = &mut self.active_modal {
+            let _ = modal.dispatch_pointer_event(event);
+            self.dirty = true;
+            return EventResponse::Handled;
+        }
+
+        if self.csd_enabled && !self.is_maximized {
+            if let Some(root) = self.root {
+                let root_rect = self.node_screen_rect(root, engine);
+                let edge = hit_test_window_edge(px, py, root_rect.width, root_rect.height, 6.0);
+                if edge != crate::platform::ResizeEdge::None {
+                    if let PointerEvent::Down { button: MouseButton::Left, .. } = *event {
+                        self.queue_window_action(WindowAction::InteractiveResize(edge));
+                        return EventResponse::Handled;
+                    }
+                }
+            }
+        }
+
         let hit = self.hit_test(engine, px, py);
 
         match *event {
@@ -290,9 +514,26 @@ impl WidgetTree {
                         }
                     }
                 }
+
+                let (hover_rect, tooltip_opt) = if let Some(target) = new_hover {
+                    let rect = self.node_screen_rect(target, engine);
+                    let tt = self
+                        .nodes
+                        .get(target.0)
+                        .and_then(|n| n.as_ref())
+                        .and_then(|n| n.widget.tooltip());
+                    (rect, tt)
+                } else {
+                    (LayoutRect::ZERO, None)
+                };
+                self.tooltip_manager
+                    .handle_hover_change(new_hover, hover_rect, tooltip_opt);
+
                 return resp;
             }
             PointerEvent::Down { .. } => {
+                self.tooltip_manager.handle_pointer_down();
+
                 let prev_focus = dispatcher.set_focus(hit);
                 if prev_focus != hit {
                     if let Some(prev) = prev_focus {
@@ -311,12 +552,17 @@ impl WidgetTree {
                 let mut curr = hit;
                 while let Some(target) = curr {
                     let rect = self.node_screen_rect(target, engine);
-                    let (handled, parent) = if let Some(Some(node)) = self.nodes.get_mut(target.0) {
+                    let (handled, parent, act) = if let Some(Some(node)) = self.nodes.get_mut(target.0) {
                         let r = node.widget.on_pointer_event(event, rect);
-                        (r == EventResponse::Handled, node.parent)
+                        let act = node.widget.take_window_action();
+                        (r == EventResponse::Handled, node.parent, act)
                     } else {
-                        (false, None)
+                        (false, None, None)
                     };
+
+                    if let Some(action) = act {
+                        self.queue_window_action(action);
+                    }
 
                     if handled {
                         dispatcher.pressed = Some(target);
@@ -336,6 +582,9 @@ impl WidgetTree {
                     let rect = self.node_screen_rect(target, engine);
                     if let Some(Some(node)) = self.nodes.get_mut(target.0) {
                         resp = node.widget.on_pointer_event(event, rect);
+                        if let Some(act) = node.widget.take_window_action() {
+                            self.queue_window_action(act);
+                        }
                     }
                 }
                 if resp == EventResponse::Handled || pressed.is_some() {
@@ -365,6 +614,7 @@ impl WidgetTree {
         }
     }
 
+    /// Collects all focusable widget IDs in preorder depth traversal.
     pub fn focusable_widgets(&self) -> Vec<WidgetId> {
         let mut list = Vec::new();
         if let Some(root_id) = self.root {
@@ -384,11 +634,19 @@ impl WidgetTree {
         }
     }
 
+    /// Dispatches keyboard events with Tab focus cycling and active focus routing.
     pub fn dispatch_key_event(
         &mut self,
         dispatcher: &mut EventDispatcher,
         event: &KeyEvent,
     ) -> EventResponse {
+        self.check_pending_modal();
+        if let Some(modal) = &mut self.active_modal {
+            let _ = modal.dispatch_key_event(event);
+            self.dirty = true;
+            return EventResponse::Handled;
+        }
+
         if let KeyEvent::KeyDown { key, modifiers, .. } = event {
             if key == "Tab" {
                 let focusable = self.focusable_widgets();
@@ -434,6 +692,7 @@ impl WidgetTree {
         EventResponse::Ignored
     }
 
+    /// Takes any popup request emitted by child widgets during event dispatching.
     pub fn take_pending_popup_request(&mut self, engine: &LayoutEngine) -> Option<PopupRequest> {
         for (idx, slot) in self.nodes.iter_mut().enumerate() {
             if let Some(node) = slot.as_mut() {
@@ -451,6 +710,7 @@ impl WidgetTree {
         None
     }
 
+    /// Notifies the source widget that its active popup has been dismissed.
     pub fn notify_popup_closed(&mut self, source: WidgetId, selected_index: Option<usize>) {
         if let Some(Some(node)) = self.nodes.get_mut(source.0) {
             node.widget.on_popup_closed(selected_index);
@@ -458,6 +718,59 @@ impl WidgetTree {
         }
     }
 
+    /// Collects and clears all pending clipboard actions across the widget tree.
+    pub fn take_clipboard_actions(&mut self) -> Vec<ClipboardAction> {
+        let mut actions = std::mem::take(&mut self.pending_clipboard_actions);
+        for slot in &mut self.nodes {
+            if let Some(node) = slot {
+                if let Some(act) = node.widget.take_clipboard_action() {
+                    actions.push(act);
+                }
+            }
+        }
+        actions
+    }
+
+    /// Dispatches pasted text from the clipboard or primary selection to the focused widget.
+    pub fn dispatch_paste(&mut self, dispatcher: &EventDispatcher, text: &str, is_primary: bool) {
+        if let Some(focus_id) = dispatcher.focus {
+            if let Some(Some(node)) = self.nodes.get_mut(focus_id.0) {
+                node.widget.on_paste(text, is_primary);
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Computes the active cursor icon shape at the current mouse position.
+    pub fn query_cursor_icon(&self, engine: &LayoutEngine, dispatcher: &EventDispatcher) -> CursorIcon {
+        if let Some(modal) = &self.active_modal {
+            let (px, py) = dispatcher.mouse_pos;
+            return modal.cursor_icon_at(px, py);
+        }
+
+        if self.csd_enabled && !self.is_maximized {
+            if let Some(root) = self.root {
+                let root_rect = self.node_screen_rect(root, engine);
+                let (px, py) = dispatcher.mouse_pos;
+                let edge = hit_test_window_edge(px, py, root_rect.width, root_rect.height, 6.0);
+                if let Some(shape) = edge.cursor_icon() {
+                    return shape;
+                }
+            }
+        }
+
+        if let Some(target_id) = dispatcher.pressed.or(dispatcher.hover) {
+            let screen_rect = self.node_screen_rect(target_id, engine);
+            if let Some(Some(node)) = self.nodes.get(target_id.0) {
+                let rel_x = dispatcher.mouse_pos.0 - screen_rect.x;
+                let rel_y = dispatcher.mouse_pos.1 - screen_rect.y;
+                return node.widget.cursor_icon_at(rel_x, rel_y);
+            }
+        }
+        CursorIcon::Default
+    }
+
+    /// Computes the absolute screen rectangle of a widget by traversing parent scroll offsets.
     pub fn node_screen_rect(&self, id: WidgetId, engine: &LayoutEngine) -> LayoutRect {
         let node = match self.nodes.get(id.0).and_then(|n| n.as_ref()) {
             Some(n) => n,
@@ -480,6 +793,7 @@ impl WidgetTree {
         LayoutRect::new(rect.x + offset_x, rect.y + offset_y, rect.width, rect.height)
     }
 
+    /// Traverses the widget tree and overlays, generating a batch of render primitives for the frame.
     pub fn paint(
         &self,
         engine: &LayoutEngine,
@@ -487,6 +801,7 @@ impl WidgetTree {
         atlas: &mut GlyphAtlas,
         rasterizer: &GlyphRasterizer,
         shaper: &TextShaper,
+        vector_atlas: &mut VectorAtlas,
         scale: f32,
     ) -> Vec<RenderPrimitive> {
         let mut primitives = Vec::new();
@@ -498,11 +813,89 @@ impl WidgetTree {
                 atlas,
                 rasterizer,
                 shaper,
+                vector_atlas,
                 scale,
                 (0.0, 0.0),
                 &mut primitives,
             );
         }
+
+        if let Some(modal) = &self.active_modal {
+            let (win_w, win_h) = self
+                .root
+                .and_then(|r| self.nodes.get(r.0).and_then(|n| n.as_ref()))
+                .map(|n| {
+                    let r = engine.get_rect(n.layout_node);
+                    (r.width.max(100.0), r.height.max(100.0))
+                })
+                .unwrap_or((800.0, 600.0));
+
+            let modal_prims = modal.paint(
+                win_w,
+                win_h,
+                scale,
+                theme,
+                atlas,
+                rasterizer,
+                shaper,
+            );
+            primitives.extend(modal_prims);
+        } else if self.tooltip_manager.is_visible() {
+            if let Some(tt) = &self.tooltip_manager.active_tooltip {
+                let alpha = self.tooltip_manager.current_alpha();
+                let font_size = 12.0;
+                let shaped = shaper.shape(&tt.text, font_size);
+                let pad_h = 8.0;
+                let pad_v = 4.0;
+                let box_w = shaped.width + pad_h * 2.0;
+                let box_h = shaped.height.max(16.0) + pad_v * 2.0;
+
+                let (win_w, win_h) = self
+                    .root
+                    .and_then(|r| self.nodes.get(r.0).and_then(|n| n.as_ref()))
+                    .map(|n| {
+                        let r = engine.get_rect(n.layout_node);
+                        (r.width.max(100.0), r.height.max(100.0))
+                    })
+                    .unwrap_or((800.0, 600.0));
+
+                let box_rect =
+                    self.tooltip_manager
+                        .calculate_bounds(box_w, box_h, win_w, win_h);
+
+                let bg_color = [0.10, 0.10, 0.10, 0.95 * alpha];
+                let border_color = [0.25, 0.25, 0.25, alpha];
+                primitives.push(RenderPrimitive::bordered_rect(
+                    [
+                        box_rect.x * scale,
+                        box_rect.y * scale,
+                        box_rect.width * scale,
+                        box_rect.height * scale,
+                    ],
+                    bg_color,
+                    CornerRadii::all(4.0 * scale),
+                    Border::new(border_color, 1.0 * scale),
+                ));
+
+                let text_x = box_rect.x + pad_h;
+                let cap_height = font_size * 0.70;
+                let baseline = box_rect.y + box_rect.height * 0.5 + cap_height * 0.5;
+                let text_color = [0.95, 0.95, 0.95, alpha];
+
+                crate::text::emit_text_glyphs(
+                    &shaped,
+                    text_x,
+                    baseline,
+                    font_size,
+                    text_color,
+                    scale,
+                    atlas,
+                    rasterizer,
+                    &mut primitives,
+                );
+            }
+        }
+
         primitives
     }
 
@@ -514,6 +907,7 @@ impl WidgetTree {
         atlas: &mut GlyphAtlas,
         rasterizer: &GlyphRasterizer,
         shaper: &TextShaper,
+        vector_atlas: &mut VectorAtlas,
         scale: f32,
         offset: (f32, f32),
         primitives: &mut Vec<RenderPrimitive>,
@@ -537,6 +931,7 @@ impl WidgetTree {
             atlas,
             rasterizer,
             shaper,
+            vector_atlas,
             scale,
         );
         primitives.append(&mut before_prims);
@@ -552,6 +947,7 @@ impl WidgetTree {
                 atlas,
                 rasterizer,
                 shaper,
+                vector_atlas,
                 scale,
                 child_offset,
                 primitives,
@@ -564,6 +960,7 @@ impl WidgetTree {
             atlas,
             rasterizer,
             shaper,
+            vector_atlas,
             scale,
         );
         primitives.append(&mut after_prims);
@@ -650,7 +1047,8 @@ mod tests {
         tree.dispatch_pointer_event(&mut dispatcher, &engine, &release_evt);
         assert!(clicked.load(Ordering::SeqCst), "Button click callback did not fire");
 
-        let prims = tree.paint(&engine, &theme, &mut atlas, &rasterizer, &shaper, 1.0);
+        let mut vector_atlas = VectorAtlas::new(256, 256);
+        let prims = tree.paint(&engine, &theme, &mut atlas, &rasterizer, &shaper, &mut vector_atlas, 1.0);
         assert!(!prims.is_empty());
     }
 
@@ -821,7 +1219,7 @@ mod tests {
             x: label_rect.x + 2.0,
             y: label_rect.y + 2.0,
             dx: 0.0,
-            dy: -2.0,
+            dy: 2.0,
         };
 
         let resp = tree.dispatch_pointer_event(&mut dispatcher, &engine, &scroll_evt);
@@ -860,5 +1258,311 @@ mod tests {
         let up_resp = tree.dispatch_pointer_event(&mut dispatcher, &engine, &up_evt);
         assert_eq!(up_resp, EventResponse::Handled);
         assert_eq!(dispatcher.pressed, None);
+    }
+
+    #[test]
+    fn test_widget_tree_cursor_icon_querying() {
+        use crate::widget::text_input::TextInput;
+
+        let mut engine = LayoutEngine::new();
+        let mut tree = WidgetTree::new();
+        let mut dispatcher = EventDispatcher::new();
+
+        let root_container = Container::new(FlexStyle {
+            width: Dimension::Points(400.0),
+            height: Dimension::Points(300.0),
+            ..Default::default()
+        });
+        let root = tree.add_widget(&mut engine, Box::new(root_container), None);
+
+        let btn = Button::new("Click Me");
+        let btn_id = tree.add_widget(&mut engine, Box::new(btn), Some(root));
+
+        let input = TextInput::new("Type here");
+        let input_id = tree.add_widget(&mut engine, Box::new(input), Some(root));
+
+        let shaper = TextShaper::default_system_font().expect("Failed font load");
+        tree.sync_layout(&mut engine, &shaper);
+
+        let root_layout_node = tree.nodes[root.0].as_ref().unwrap().layout_node;
+        engine.compute(root_layout_node, 400.0, 300.0);
+
+        let btn_rect = engine.get_rect(tree.nodes[btn_id.0].as_ref().unwrap().layout_node);
+        let input_rect = engine.get_rect(tree.nodes[input_id.0].as_ref().unwrap().layout_node);
+
+        let move_btn = PointerEvent::Move {
+            x: btn_rect.x + 5.0,
+            y: btn_rect.y + 5.0,
+        };
+        tree.dispatch_pointer_event(&mut dispatcher, &engine, &move_btn);
+        assert_eq!(tree.query_cursor_icon(&engine, &dispatcher), CursorIcon::Pointer);
+
+        let move_input = PointerEvent::Move {
+            x: input_rect.x + 5.0,
+            y: input_rect.y + 5.0,
+        };
+        tree.dispatch_pointer_event(&mut dispatcher, &engine, &move_input);
+        assert_eq!(tree.query_cursor_icon(&engine, &dispatcher), CursorIcon::Text);
+
+        let move_empty = PointerEvent::Move {
+            x: 350.0,
+            y: 250.0,
+        };
+        tree.dispatch_pointer_event(&mut dispatcher, &engine, &move_empty);
+        assert_eq!(tree.query_cursor_icon(&engine, &dispatcher), CursorIcon::Default);
+    }
+
+    #[test]
+    fn test_widget_tree_tooltip_overlay_integration() {
+        use crate::widget::tooltip::TooltipPhase;
+
+        let mut engine = LayoutEngine::new();
+        let mut tree = WidgetTree::new();
+        let mut dispatcher = EventDispatcher::new();
+
+        let root_container = Container::new(FlexStyle {
+            width: Dimension::Points(400.0),
+            height: Dimension::Points(300.0),
+            ..Default::default()
+        });
+        let root = tree.add_widget(&mut engine, Box::new(root_container), None);
+
+        let btn = Button::new("Click Me").with_tooltip("Increment Counter");
+        let btn_id = tree.add_widget(&mut engine, Box::new(btn), Some(root));
+
+        let shaper = TextShaper::default_system_font().expect("Failed font load");
+        let rasterizer = GlyphRasterizer::new(shaper.font_db().clone());
+        let mut atlas = GlyphAtlas::new(512, 512, 1);
+        let mut vector_atlas = crate::render::VectorAtlas::new(256, 256);
+        let theme = Theme::dark();
+
+        tree.sync_layout(&mut engine, &shaper);
+        let root_layout_node = tree.nodes[root.0].as_ref().unwrap().layout_node;
+        engine.compute(root_layout_node, 400.0, 300.0);
+
+        let btn_rect = engine.get_rect(tree.nodes[btn_id.0].as_ref().unwrap().layout_node);
+
+        // Move over button -> Waiting phase
+        let move_btn = PointerEvent::Move {
+            x: btn_rect.x + 5.0,
+            y: btn_rect.y + 5.0,
+        };
+        tree.dispatch_pointer_event(&mut dispatcher, &engine, &move_btn);
+        assert_eq!(tree.tooltip_manager.phase, TooltipPhase::Waiting);
+
+        // Advance 500ms -> FadingIn phase
+        tree.tick_animations(500.0);
+        assert_eq!(tree.tooltip_manager.phase, TooltipPhase::FadingIn);
+
+        // Advance 150ms -> Visible phase
+        tree.tick_animations(150.0);
+        assert_eq!(tree.tooltip_manager.phase, TooltipPhase::Visible);
+        assert!(tree.tooltip_manager.is_visible());
+
+        // Paint should now include tooltip primitives
+        let prims = tree.paint(
+            &engine,
+            &theme,
+            &mut atlas,
+            &rasterizer,
+            &shaper,
+            &mut vector_atlas,
+            1.0,
+        );
+        assert!(prims.len() > 2);
+
+        // Move to empty space -> FadingOut phase
+        let move_empty = PointerEvent::Move {
+            x: 350.0,
+            y: 250.0,
+        };
+        tree.dispatch_pointer_event(&mut dispatcher, &engine, &move_empty);
+        assert_eq!(tree.tooltip_manager.phase, TooltipPhase::FadingOut);
+
+        // Advance fade out to completion
+        tree.tick_animations(150.0);
+        assert_eq!(tree.tooltip_manager.phase, TooltipPhase::Inactive);
+        assert!(!tree.tooltip_manager.is_visible());
+
+        // Move back to button, then click -> Instant dismiss
+        tree.dispatch_pointer_event(&mut dispatcher, &engine, &move_btn);
+        tree.tick_animations(500.0);
+        assert_eq!(tree.tooltip_manager.phase, TooltipPhase::FadingIn);
+
+        let down_evt = PointerEvent::Down {
+            x: btn_rect.x + 5.0,
+            y: btn_rect.y + 5.0,
+            button: MouseButton::Left,
+        };
+        tree.dispatch_pointer_event(&mut dispatcher, &engine, &down_evt);
+        assert_eq!(tree.tooltip_manager.phase, TooltipPhase::Inactive);
+    }
+
+    #[test]
+    fn test_widget_tree_modal_dialog_lifecycle_and_interception() {
+        use std::sync::Mutex;
+        use crate::widget::dialog::{Dialog, DialogResponse};
+
+        let mut engine = LayoutEngine::new();
+        let mut tree = WidgetTree::new();
+        let mut dispatcher = EventDispatcher::new();
+
+        let root_container = Container::new(FlexStyle {
+            width: Dimension::Points(600.0),
+            height: Dimension::Points(400.0),
+            ..Default::default()
+        });
+        let root = tree.add_widget(&mut engine, Box::new(root_container), None);
+
+        let bg_clicked = Arc::new(AtomicBool::new(false));
+        let bg_clicked_clone = bg_clicked.clone();
+        let bg_btn = Button::new("Background Action").on_click(move || {
+            bg_clicked_clone.store(true, Ordering::SeqCst);
+        });
+        let bg_btn_id = tree.add_widget(&mut engine, Box::new(bg_btn), Some(root));
+
+        let shaper = TextShaper::default_system_font().expect("Failed font load");
+        tree.sync_layout(&mut engine, &shaper);
+        let root_layout_node = tree.nodes[root.0].as_ref().unwrap().layout_node;
+        engine.compute(root_layout_node, 600.0, 400.0);
+
+        let btn_rect = engine.get_rect(tree.nodes[bg_btn_id.0].as_ref().unwrap().layout_node);
+
+        // Open confirm modal
+        let modal_res = Arc::new(Mutex::new(None));
+        let modal_res_clone = modal_res.clone();
+        let dialog = Dialog::confirm("Delete Record", "Permanent action").on_response(move |resp| {
+            *modal_res_clone.lock().unwrap() = Some(resp);
+        });
+        tree.open_modal(dialog);
+        assert!(tree.is_modal_active());
+
+        // Advance entrance animation
+        tree.tick_animations(180.0);
+
+        // Click outside on background button -> Must be intercepted by scrim!
+        let down_bg = PointerEvent::Down {
+            x: btn_rect.x + 2.0,
+            y: btn_rect.y + 2.0,
+            button: MouseButton::Left,
+        };
+        tree.dispatch_pointer_event(&mut dispatcher, &engine, &down_bg);
+        assert!(!bg_clicked.load(Ordering::SeqCst));
+
+        // Background click dismissed the modal (dismiss_on_backdrop: true)
+        tree.tick_animations(150.0);
+        assert!(!tree.is_modal_active());
+        assert_eq!(*modal_res.lock().unwrap(), Some(DialogResponse::Cancel));
+
+        // Re-open modal and click Confirm button
+        let modal_res2 = Arc::new(Mutex::new(None));
+        let modal_res2_clone = modal_res2.clone();
+        let dialog2 = Dialog::confirm("Delete Record", "Permanent action").on_response(move |resp| {
+            *modal_res2_clone.lock().unwrap() = Some(resp);
+        });
+        tree.open_modal(dialog2);
+        tree.tick_animations(180.0);
+
+        // Confirm button is the second button
+        let confirm_rect = tree.active_modal.as_ref().unwrap().button_rects.borrow()[1];
+        let down_confirm = PointerEvent::Down {
+            x: confirm_rect.x + 5.0,
+            y: confirm_rect.y + 5.0,
+            button: MouseButton::Left,
+        };
+        tree.dispatch_pointer_event(&mut dispatcher, &engine, &down_confirm);
+        tree.tick_animations(150.0);
+        assert!(!tree.is_modal_active());
+        assert_eq!(*modal_res2.lock().unwrap(), Some(DialogResponse::Confirm));
+    }
+
+    #[test]
+    fn test_hit_test_window_edge_detection() {
+        let (win_w, win_h, margin) = (800.0, 600.0, 6.0);
+        use crate::platform::ResizeEdge;
+
+        assert_eq!(hit_test_window_edge(2.0, 2.0, win_w, win_h, margin), ResizeEdge::TopLeft);
+        assert_eq!(hit_test_window_edge(798.0, 2.0, win_w, win_h, margin), ResizeEdge::TopRight);
+        assert_eq!(hit_test_window_edge(2.0, 598.0, win_w, win_h, margin), ResizeEdge::BottomLeft);
+        assert_eq!(hit_test_window_edge(798.0, 598.0, win_w, win_h, margin), ResizeEdge::BottomRight);
+
+        assert_eq!(hit_test_window_edge(400.0, 2.0, win_w, win_h, margin), ResizeEdge::Top);
+        assert_eq!(hit_test_window_edge(400.0, 598.0, win_w, win_h, margin), ResizeEdge::Bottom);
+        assert_eq!(hit_test_window_edge(2.0, 300.0, win_w, win_h, margin), ResizeEdge::Left);
+        assert_eq!(hit_test_window_edge(798.0, 300.0, win_w, win_h, margin), ResizeEdge::Right);
+
+        assert_eq!(hit_test_window_edge(400.0, 300.0, win_w, win_h, margin), ResizeEdge::None);
+    }
+
+    #[test]
+    fn test_csd_window_edge_resizing_and_actions() {
+        let mut tree = WidgetTree::new();
+        let mut engine = LayoutEngine::new();
+        let mut dispatcher = EventDispatcher::new();
+
+        let root_container = Container::new(FlexStyle {
+            width: Dimension::Points(800.0),
+            height: Dimension::Points(600.0),
+            ..Default::default()
+        });
+        tree.add_widget(&mut engine, Box::new(root_container), None);
+        engine.compute(tree.nodes[0].as_ref().unwrap().layout_node, 800.0, 600.0);
+
+        tree.set_csd_enabled(true);
+
+        // Move to right edge: cursor should change to EwResize
+        dispatcher.mouse_pos = (798.0, 300.0);
+        assert_eq!(tree.query_cursor_icon(&engine, &dispatcher), CursorIcon::EwResize);
+
+        // Click right edge: should queue InteractiveResize(Right)
+        let down_evt = PointerEvent::Down {
+            x: 798.0,
+            y: 300.0,
+            button: MouseButton::Left,
+        };
+        let resp = tree.dispatch_pointer_event(&mut dispatcher, &engine, &down_evt);
+        assert_eq!(resp, EventResponse::Handled);
+
+        let actions = tree.take_window_actions();
+        assert_eq!(actions, vec![WindowAction::InteractiveResize(crate::platform::ResizeEdge::Right)]);
+    }
+
+    #[test]
+    fn test_titlebar_integration_in_widget_tree() {
+        use crate::widget::Titlebar;
+        let mut tree = WidgetTree::new();
+        let mut engine = LayoutEngine::new();
+        let mut dispatcher = EventDispatcher::new();
+
+        let root_container = Container::new(FlexStyle {
+            direction: crate::layout::FlexDirection::Column,
+            width: Dimension::Points(800.0),
+            height: Dimension::Points(600.0),
+            ..Default::default()
+        });
+        let root = tree.add_widget(&mut engine, Box::new(root_container), None);
+
+        let titlebar = Titlebar::new("Test App");
+        tree.add_widget(&mut engine, Box::new(titlebar), Some(root));
+
+        engine.compute(tree.nodes[0].as_ref().unwrap().layout_node, 800.0, 600.0);
+
+        // Click Close button at top-right
+        let down_close = PointerEvent::Down {
+            x: 780.0,
+            y: 19.0,
+            button: MouseButton::Left,
+        };
+        tree.dispatch_pointer_event(&mut dispatcher, &engine, &down_close);
+
+        let up_close = PointerEvent::Up {
+            x: 780.0,
+            y: 19.0,
+            button: MouseButton::Left,
+        };
+        tree.dispatch_pointer_event(&mut dispatcher, &engine, &up_close);
+
+        let actions = tree.take_window_actions();
+        assert_eq!(actions, vec![WindowAction::Close]);
     }
 }

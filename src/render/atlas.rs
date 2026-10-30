@@ -1,3 +1,5 @@
+//! Dynamic 2D bin-packing glyph cache atlas with multi-page LRU eviction.
+
 use std::collections::HashMap;
 
 use anyhow::{bail, Result};
@@ -5,23 +7,37 @@ use fontdb::ID;
 
 use crate::text::rasterizer::GlyphRasterizer;
 
+/// Coordinates and metrics of a cached glyph within a texture atlas page.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AtlasRegion {
+    /// Texture page index where glyph is stored.
     pub page: u8,
+    /// Pixel X coordinate on page.
     pub x: u32,
+    /// Pixel Y coordinate on page.
     pub y: u32,
+    /// Pixel width of cached glyph bitmap.
     pub width: u32,
+    /// Pixel height of cached glyph bitmap.
     pub height: u32,
+    /// Normalized UV coordinates `[u_min, v_min, u_max, v_max]`.
     pub uv_rect: [f32; 4],
+    /// Horizontal offset from origin in pixels.
     pub offset_x: f32,
+    /// Vertical offset from origin in pixels.
     pub offset_y: f32,
 }
 
+/// Cache key uniquely identifying a shaped, sized, and subpixel-bucketed glyph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct GlyphKey {
+    /// Font face identifier.
     pub face_id: ID,
+    /// OpenType glyph ID.
     pub glyph_id: u32,
+    /// Floating point font size in bits for exact matching.
     pub size_bits: u32,
+    /// Subpixel horizontal offset bucket (0..3).
     pub subpixel_bucket: u8,
 }
 
@@ -31,7 +47,9 @@ struct Shelf {
     current_x: u32,
 }
 
+/// A single 2D texture allocation page holding packed glyphs.
 pub struct AtlasPage {
+    /// Single-channel 8-bit alpha pixel buffer.
     pub data: Vec<u8>,
     shelves: Vec<Shelf>,
     dirty_rect: Option<[u32; 4]>,
@@ -53,6 +71,7 @@ impl AtlasPage {
     }
 }
 
+/// Dynamic multi-page texture atlas manager for rasterized font glyphs.
 pub struct GlyphAtlas {
     width: u32,
     height: u32,
@@ -64,6 +83,7 @@ pub struct GlyphAtlas {
 }
 
 impl GlyphAtlas {
+    /// Creates a new glyph atlas with initial dimensions and maximum page capacity.
     pub fn new(width: u32, height: u32, max_pages: usize) -> Self {
         let mut initial_pages = Vec::with_capacity(max_pages.max(1));
         initial_pages.push(AtlasPage::new(width, height));
@@ -79,22 +99,27 @@ impl GlyphAtlas {
         }
     }
 
+    /// Returns `(width, height)` of an atlas page in pixels.
     pub fn dimensions(&self) -> (u32, u32) {
         (self.width, self.height)
     }
 
+    /// Returns the number of allocated pages.
     pub fn page_count(&self) -> usize {
         self.pages.len()
     }
 
+    /// Returns a reference to the raw pixel data for a page.
     pub fn page_data(&self, page: u8) -> &[u8] {
         &self.pages[page as usize].data
     }
 
+    /// Returns `true` if new glyphs were inserted since last GPU texture sync.
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
 
+    /// Clears the atlas dirty flag.
     pub fn mark_clean(&mut self) {
         self.dirty = false;
         for page in &mut self.pages {
@@ -102,6 +127,7 @@ impl GlyphAtlas {
         }
     }
 
+    /// Returns and resets all dirty bounding rectangles across pages.
     pub fn take_dirty_rects(&mut self) -> Vec<(u8, [u32; 4])> {
         let mut rects = Vec::new();
         for (idx, page) in self.pages.iter_mut().enumerate() {
@@ -113,6 +139,7 @@ impl GlyphAtlas {
         rects
     }
 
+    /// Looks up a cached glyph region or rasterizes and packs it into the atlas.
     pub fn get_or_insert(
         &mut self,
         rasterizer: &GlyphRasterizer,

@@ -1,19 +1,29 @@
+//! Vulkan WSI swapchain creation, image view generation, and presentation synchronization.
+
 use anyhow::{Context, Result};
 use ash::khr::swapchain;
 use ash::vk;
 
 use super::context::VulkanContext;
 
+/// Manages the Vulkan presentation swapchain and associated image views.
 pub struct VulkanSwapchain {
+    /// Vulkan swapchain device extension loader.
     pub swapchain_loader: swapchain::Device,
+    /// Swapchain KHR handle.
     pub swapchain: vk::SwapchainKHR,
+    /// Vector of swapchain presentable images.
     pub images: Vec<vk::Image>,
+    /// Image views corresponding to each swapchain image.
     pub image_views: Vec<vk::ImageView>,
+    /// Color format chosen for the swapchain.
     pub format: vk::Format,
+    /// Physical resolution extent of swapchain images.
     pub extent: vk::Extent2D,
 }
 
 impl VulkanSwapchain {
+    /// Creates a new presentation swapchain conforming to surface capabilities and target dimensions.
     pub fn new(
         context: &VulkanContext,
         surface_loader: &ash::khr::surface::Instance,
@@ -115,6 +125,7 @@ impl VulkanSwapchain {
         })
     }
 
+    /// Acquires the next presentable image index, signaling `semaphore` when ready.
     pub fn acquire_next_image(&self, semaphore: vk::Semaphore) -> Result<(u32, bool)> {
         let (idx, suboptimal) = unsafe {
             self.swapchain_loader
@@ -123,6 +134,7 @@ impl VulkanSwapchain {
         Ok((idx, suboptimal))
     }
 
+    /// Destroys all swapchain image views and the swapchain handle.
     pub fn destroy(&self, device: &ash::Device) {
         unsafe {
             for &view in &self.image_views {

@@ -1,4 +1,8 @@
+//! Interpolation, easing curves, and animated value tweens.
+
+/// Trait for types supporting linear interpolation between two values.
 pub trait Lerp: Copy + PartialEq {
+    /// Computes linear interpolation `a + (b - a) * t` for parameter `t`.
     fn lerp(a: Self, b: Self, t: f32) -> Self;
 }
 
@@ -28,16 +32,23 @@ impl Lerp for [f32; 4] {
     }
 }
 
+/// Standard easing curves and cubic bezier interpolations.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Easing {
+    /// Constant rate progression.
     Linear,
+    /// Accelerating cubic curve.
     EaseIn,
+    /// Decelerating cubic curve.
     EaseOut,
+    /// S-curve with acceleration and deceleration.
     EaseInOut,
+    /// Cubic bezier defined by control points `(x1, y1)` and `(x2, y2)`.
     CubicBezier(f32, f32, f32, f32),
 }
 
 impl Easing {
+    /// Evaluates the easing curve at progress `t` in range `[0.0, 1.0]`.
     pub fn sample(&self, t: f32) -> f32 {
         let t = t.clamp(0.0, 1.0);
         match *self {
@@ -82,17 +93,25 @@ fn sample_cubic_bezier(x1: f32, y1: f32, x2: f32, y2: f32, target_x: f32) -> f32
         + t * t * t
 }
 
+/// A value animator that interpolates between two states over time.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Tween<T: Lerp> {
+    /// Starting value of the current transition.
     pub from: T,
+    /// Destination value of the current transition.
     pub to: T,
+    /// Current interpolated value.
     pub current: T,
+    /// Total duration of transition in milliseconds.
     pub duration_ms: f32,
+    /// Elapsed time in milliseconds.
     pub elapsed_ms: f32,
+    /// Active easing curve.
     pub easing: Easing,
 }
 
 impl<T: Lerp> Tween<T> {
+    /// Creates a static tween initialized to `initial`.
     pub fn new(initial: T) -> Self {
         Self {
             from: initial,
@@ -104,6 +123,7 @@ impl<T: Lerp> Tween<T> {
         }
     }
 
+    /// Sets a new target value and duration.
     pub fn set_target(&mut self, target: T, duration_ms: f32, easing: Easing) {
         if self.to == target && !self.is_complete() {
             return;
@@ -115,6 +135,7 @@ impl<T: Lerp> Tween<T> {
         self.easing = easing;
     }
 
+    /// Advances the animation by `delta_ms` milliseconds and returns the current interpolated value.
     pub fn tick(&mut self, delta_ms: f32) -> T {
         if self.elapsed_ms < self.duration_ms {
             self.elapsed_ms = (self.elapsed_ms + delta_ms).min(self.duration_ms);
@@ -127,10 +148,12 @@ impl<T: Lerp> Tween<T> {
         self.current
     }
 
+    /// Returns `true` if the transition duration has elapsed.
     pub fn is_complete(&self) -> bool {
         self.elapsed_ms >= self.duration_ms
     }
 
+    /// Returns the current interpolated value.
     pub fn value(&self) -> T {
         self.current
     }

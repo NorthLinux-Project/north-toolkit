@@ -1,26 +1,42 @@
+//! Retained-mode widget tree, base traits, reactive properties, and concrete UI components.
+
 pub mod button;
 pub mod checkbox;
 pub mod container;
+pub mod dialog;
+pub mod icon;
 pub mod image;
 pub mod label;
 pub mod popup;
 pub mod scroll_area;
 pub mod slider;
 pub mod state;
+pub mod svg;
 pub mod switch;
+pub mod table_view;
 pub mod text_input;
+pub mod titlebar;
+pub mod tooltip;
 pub mod tree;
+pub mod virtual_list;
 
 pub use button::Button;
 pub use checkbox::Checkbox;
 pub use container::Container;
+pub use dialog::{Dialog, DialogButton, DialogResponse, ModalHandle};
+pub use icon::{Icon, IconName};
 pub use image::Image;
 pub use label::Label;
 pub use popup::{Dropdown, MenuItem, PopupMenu};
 pub use scroll_area::ScrollArea;
 pub use slider::Slider;
 pub use state::Property;
+pub use svg::Svg;
 pub use switch::Switch;
+pub use table_view::{SortDirection, TableColumn, TableView};
 pub use text_input::TextInput;
+pub use titlebar::{Titlebar, TitlebarControl};
+pub use tooltip::{Tooltip, TooltipPlacement};
+pub use virtual_list::{ItemState, ListItem, VirtualList};
 pub use crate::event::WidgetId;
-pub use tree::{PopupRequest, Widget, WidgetNode, WidgetTree};
+pub use tree::{ClipboardAction, PopupRequest, Widget, WidgetNode, WidgetTree, WindowAction};

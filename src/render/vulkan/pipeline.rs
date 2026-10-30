@@ -1,3 +1,5 @@
+//! Vulkan 1.3 graphic pipelines for SDF rounded quads and textured text glyph batches.
+
 use std::mem;
 
 use anyhow::{bail, Context, Result};
@@ -6,47 +8,73 @@ use ash::Device;
 
 use super::texture::VulkanTexture;
 
+/// Compiled SPIR-V bytecode for the quad vertex shader.
 pub const QUAD_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/quad.vert.spv"));
+/// Compiled SPIR-V bytecode for the quad fragment shader.
 pub const QUAD_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/quad.frag.spv"));
+/// Compiled SPIR-V bytecode for the glyph vertex shader.
 pub const GLYPH_VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/glyph.vert.spv"));
+/// Compiled SPIR-V bytecode for the glyph fragment shader.
 pub const GLYPH_FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/glyph.frag.spv"));
 
+/// Push constants layout for quad rendering (fits within Vulkan 128-byte guarantee).
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct QuadPushConstants {
+    /// 2D orthographic projection constants `[2/w, 2/h, -1, -1]`.
     pub projection: [f32; 4],
+    /// Destination rectangle `[x, y, width, height]`.
     pub rect: [f32; 4],
+    /// Texture coordinate UV rectangle `[u1, v1, u2, v2]`.
     pub uv_rect: [f32; 4],
+    /// RGBA fill color in range `[0.0, 1.0]`.
     pub color: [f32; 4],
+    /// RGBA outline border color.
     pub border_color: [f32; 4],
+    /// Corner radii `[top_left, top_right, bottom_right, bottom_left]`.
     pub radii: [f32; 4],
+    /// Extra parameters `[border_width, use_texture, 0.0, 0.0]`.
     pub params: [f32; 4],
 }
 
+/// Per-instance vertex buffer layout for text glyph rendering.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
 pub struct GlyphInstance {
+    /// Screen destination rectangle `[x, y, width, height]`.
     pub rect: [f32; 4],
+    /// Texture atlas UV rectangle `[u1, v1, u2, v2]`.
     pub uv_rect: [f32; 4],
+    /// RGBA text color tint.
     pub color: [f32; 4],
 }
 
+/// Push constants layout for glyph batch rendering.
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct GlyphPushConstants {
+    /// Orthographic projection matrix (4x4 column-major).
     pub projection: [f32; 16],
 }
 
+/// Graphics pipeline for rendering solid, rounded, and bordered quads.
 pub struct QuadPipeline {
+    /// Descriptor set layout for the texture sampler.
     pub descriptor_set_layout: vk::DescriptorSetLayout,
+    /// Pipeline layout matching push constants and descriptor set.
     pub pipeline_layout: vk::PipelineLayout,
+    /// Vulkan pipeline handle with dynamic rendering.
     pub pipeline: vk::Pipeline,
+    /// Linear texture sampler.
     pub sampler: vk::Sampler,
+    /// Descriptor pool for texture descriptor set.
     pub descriptor_pool: vk::DescriptorPool,
+    /// Bound descriptor set for texture sampling.
     pub descriptor_set: vk::DescriptorSet,
 }
 
 impl QuadPipeline {
+    /// Creates a new quad graphics pipeline targeting the given color format.
     pub fn new(
         device: &Device,
         color_format: vk::Format,
@@ -206,6 +234,7 @@ impl QuadPipeline {
         })
     }
 
+    /// Destroys all pipeline, layout, descriptor pool, and sampler resources.
     pub fn destroy(&self, device: &Device) {
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
@@ -217,16 +246,24 @@ impl QuadPipeline {
     }
 }
 
+/// Graphics pipeline for instanced text glyph batch rendering.
 pub struct GlyphPipeline {
+    /// Descriptor set layout for font texture pages.
     pub descriptor_set_layout: vk::DescriptorSetLayout,
+    /// Pipeline layout matching glyph push constants and descriptor sets.
     pub pipeline_layout: vk::PipelineLayout,
+    /// Vulkan pipeline handle with alpha blending.
     pub pipeline: vk::Pipeline,
+    /// Point/nearest-neighbor texture sampler.
     pub sampler: vk::Sampler,
+    /// Descriptor pool for atlas page descriptor sets.
     pub descriptor_pool: vk::DescriptorPool,
+    /// Descriptor sets for each allocated glyph atlas page.
     pub descriptor_sets: Vec<vk::DescriptorSet>,
 }
 
 impl GlyphPipeline {
+    /// Creates a new instanced glyph graphics pipeline targeting the given color format.
     pub fn new(
         device: &Device,
         color_format: vk::Format,
@@ -419,6 +456,7 @@ impl GlyphPipeline {
         })
     }
 
+    /// Allocates and binds a new descriptor set for an added font atlas page texture.
     pub fn add_atlas_page(
         &mut self,
         device: &Device,
@@ -450,6 +488,7 @@ impl GlyphPipeline {
         Ok(descriptor_set)
     }
 
+    /// Destroys the pipeline, layout, descriptor pool, descriptor sets, and sampler.
     pub fn destroy(&self, device: &Device) {
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
@@ -461,6 +500,7 @@ impl GlyphPipeline {
     }
 }
 
+/// Helper function creating a `vk::ShaderModule` from 4-byte aligned SPIR-V bytecode.
 pub fn create_shader_module(device: &Device, spv_bytes: &[u8]) -> Result<vk::ShaderModule> {
     if spv_bytes.len() % 4 != 0 {
         bail!("Shader bytecode length is not a multiple of 4");

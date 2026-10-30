@@ -1,68 +1,103 @@
+//! Custom Flexbox layout engine, style properties, dimension resolution, and node hierarchy.
+
+/// Direction of the flex container main axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FlexDirection {
+    /// Items flow horizontally from left to right.
     #[default]
     Row,
+    /// Items flow vertically from top to bottom.
     Column,
+    /// Items flow horizontally in reverse order.
     RowReverse,
+    /// Items flow vertically in reverse order.
     ColumnReverse,
 }
 
 impl FlexDirection {
+    /// Returns `true` if the flex direction is horizontal.
     pub fn is_row(self) -> bool {
         matches!(self, FlexDirection::Row | FlexDirection::RowReverse)
     }
 
+    /// Returns `true` if items flow in reverse order.
     pub fn is_reverse(self) -> bool {
         matches!(self, FlexDirection::RowReverse | FlexDirection::ColumnReverse)
     }
 }
 
+/// Wrapping behavior of flex items along the cross axis.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FlexWrap {
+    /// Single-line container; children may overflow or shrink.
     #[default]
     NoWrap,
+    /// Multi-line container; children wrap onto new lines.
     Wrap,
 }
 
+/// Main-axis distribution of free space between items.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum JustifyContent {
+    /// Items packed flush with start of the main axis.
     #[default]
     FlexStart,
+    /// Items centered along the main axis.
     Center,
+    /// Items packed flush with end of the main axis.
     FlexEnd,
+    /// Items evenly distributed; first at start, last at end.
     SpaceBetween,
+    /// Items evenly distributed with equal space around each item.
     SpaceAround,
+    /// Items distributed with equal spacing between each item and edges.
     SpaceEvenly,
 }
 
+/// Cross-axis alignment of items along a single flex line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlignItems {
+    /// Stretch items to fill the cross axis dimension of the line.
     #[default]
     Stretch,
+    /// Align items flush with start of the cross axis.
     FlexStart,
+    /// Center items along the cross axis.
     Center,
+    /// Align items flush with end of the cross axis.
     FlexEnd,
 }
 
+/// Per-item override for cross-axis alignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum AlignSelf {
+    /// Inherit `AlignItems` from parent container.
     #[default]
     Auto,
+    /// Align item flush with start of the cross axis.
     FlexStart,
+    /// Center item along the cross axis.
     Center,
+    /// Align item flush with end of the cross axis.
     FlexEnd,
+    /// Stretch item across the cross axis.
     Stretch,
 }
 
+/// Sizing dimension specification for width, height, and basis.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Dimension {
+    /// Automatic sizing based on intrinsic content or flex distribution.
     #[default]
     Auto,
+    /// Fixed size in logical points/pixels.
     Points(f32),
+    /// Percentage relative to parent container size.
     Percent(f32),
 }
 
 impl Dimension {
+    /// Resolves dimension against an optional parent size.
     pub fn resolve(self, parent_size: Option<f32>) -> Option<f32> {
         match self {
             Dimension::Auto => None,
@@ -72,15 +107,21 @@ impl Dimension {
     }
 }
 
+/// Insets applied to borders, padding, or margins.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct EdgeInsets {
+    /// Top inset.
     pub top: f32,
+    /// Right inset.
     pub right: f32,
+    /// Bottom inset.
     pub bottom: f32,
+    /// Left inset.
     pub left: f32,
 }
 
 impl EdgeInsets {
+    /// Zero insets on all four edges.
     pub const ZERO: Self = Self {
         top: 0.0,
         right: 0.0,
@@ -88,6 +129,7 @@ impl EdgeInsets {
         left: 0.0,
     };
 
+    /// Uniform insets on all four edges.
     pub fn all(val: f32) -> Self {
         Self {
             top: val,
@@ -97,6 +139,7 @@ impl EdgeInsets {
         }
     }
 
+    /// Symmetric vertical and horizontal insets.
     pub fn symmetric(vertical: f32, horizontal: f32) -> Self {
         Self {
             top: vertical,
@@ -106,24 +149,32 @@ impl EdgeInsets {
         }
     }
 
+    /// Sum of left and right insets.
     pub fn horizontal(&self) -> f32 {
         self.left + self.right
     }
 
+    /// Sum of top and bottom insets.
     pub fn vertical(&self) -> f32 {
         self.top + self.bottom
     }
 }
 
+/// Computed 2D bounding rectangle in logical coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LayoutRect {
+    /// Top-left X coordinate.
     pub x: f32,
+    /// Top-left Y coordinate.
     pub y: f32,
+    /// Width in logical points.
     pub width: f32,
+    /// Height in logical points.
     pub height: f32,
 }
 
 impl LayoutRect {
+    /// An empty rectangle positioned at the origin.
     pub const ZERO: Self = Self {
         x: 0.0,
         y: 0.0,
@@ -131,6 +182,7 @@ impl LayoutRect {
         height: 0.0,
     };
 
+    /// Creates a new layout rectangle.
     pub fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
         Self {
             x,
@@ -140,41 +192,65 @@ impl LayoutRect {
         }
     }
 
+    /// Converts to `[x, y, width, height]` array format.
     pub fn to_array(self) -> [f32; 4] {
         [self.x, self.y, self.width, self.height]
     }
 
+    /// Returns `true` if logical coordinates `(px, py)` lie within this rectangle.
     pub fn contains(&self, px: f32, py: f32) -> bool {
         px >= self.x && px < (self.x + self.width) && py >= self.y && py < (self.y + self.height)
     }
 }
 
+/// Clipping behavior for content extending past node bounds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Overflow {
+    /// Unclipped; children may overflow visible bounds.
     #[default]
     Visible,
+    /// Clipped to node bounds.
     Hidden,
+    /// Clipped and scrollable.
     Scroll,
 }
 
+/// Style attributes determining flexbox layout computation for a node.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FlexStyle {
+    /// Direction of the main axis.
     pub direction: FlexDirection,
+    /// Wrapping behavior.
     pub wrap: FlexWrap,
+    /// Main-axis alignment and space distribution.
     pub justify_content: JustifyContent,
+    /// Cross-axis alignment.
     pub align_items: AlignItems,
+    /// Overflow clipping mode.
     pub overflow: Overflow,
+    /// Requested width.
     pub width: Dimension,
+    /// Requested height.
     pub height: Dimension,
+    /// Minimum width constraint.
     pub min_width: Option<f32>,
+    /// Maximum width constraint.
     pub max_width: Option<f32>,
+    /// Minimum height constraint.
     pub min_height: Option<f32>,
+    /// Maximum height constraint.
     pub max_height: Option<f32>,
+    /// Growth factor for distributing extra main-axis space.
     pub flex_grow: f32,
+    /// Shrink factor when main axis is constrained.
     pub flex_shrink: f32,
+    /// Initial main-axis size before growing or shrinking.
     pub flex_basis: Dimension,
+    /// Internal padding insets.
     pub padding: EdgeInsets,
+    /// External margin insets.
     pub margin: EdgeInsets,
+    /// Space between consecutive children.
     pub gap: f32,
 }
 
@@ -202,19 +278,27 @@ impl Default for FlexStyle {
     }
 }
 
+/// Handle identifying a layout node within the `LayoutEngine`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct LayoutNodeId(pub usize);
 
+/// Measurement closure for computing intrinsic node dimensions.
 pub type MeasureFunc = Box<dyn Fn(Option<f32>, Option<f32>) -> (f32, f32)>;
 
+/// Internal representation of a layout node.
 pub struct LayoutNode {
+    /// Style configuration.
     pub style: FlexStyle,
+    /// Child node identifiers in document order.
     pub children: Vec<LayoutNodeId>,
+    /// Custom intrinsic measurement closure.
     pub measure: Option<MeasureFunc>,
+    /// Computed absolute layout bounds.
     pub computed_rect: LayoutRect,
 }
 
 impl LayoutNode {
+    /// Creates a new layout node with default children and uncomputed rect.
     pub fn new(style: FlexStyle) -> Self {
         Self {
             style,
@@ -225,15 +309,18 @@ impl LayoutNode {
     }
 }
 
+/// Retained flexbox layout calculation engine.
 pub struct LayoutEngine {
     nodes: Vec<Option<LayoutNode>>,
 }
 
 impl LayoutEngine {
+    /// Creates an empty layout engine.
     pub fn new() -> Self {
         Self { nodes: Vec::new() }
     }
 
+    /// Allocates a new layout node with the specified style.
     pub fn create_node(&mut self, style: FlexStyle) -> LayoutNodeId {
         let node = LayoutNode::new(style);
         for (idx, slot) in self.nodes.iter_mut().enumerate() {
@@ -247,18 +334,21 @@ impl LayoutEngine {
         id
     }
 
+    /// Sets an intrinsic measurement function on a node.
     pub fn set_measure(&mut self, node: LayoutNodeId, measure: MeasureFunc) {
         if let Some(Some(n)) = self.nodes.get_mut(node.0) {
             n.measure = Some(measure);
         }
     }
 
+    /// Updates the style configuration for an existing node.
     pub fn set_style(&mut self, node: LayoutNodeId, style: FlexStyle) {
         if let Some(Some(n)) = self.nodes.get_mut(node.0) {
             n.style = style;
         }
     }
 
+    /// Appends a child node to a parent node.
     pub fn add_child(&mut self, parent: LayoutNodeId, child: LayoutNodeId) {
         if let Some(Some(p)) = self.nodes.get_mut(parent.0) {
             if !p.children.contains(&child) {
@@ -267,12 +357,14 @@ impl LayoutEngine {
         }
     }
 
+    /// Removes and frees a layout node.
     pub fn remove_node(&mut self, node: LayoutNodeId) {
         if let Some(slot) = self.nodes.get_mut(node.0) {
             *slot = None;
         }
     }
 
+    /// Retrieves the computed bounding rectangle for a node.
     pub fn get_rect(&self, node: LayoutNodeId) -> LayoutRect {
         self.nodes
             .get(node.0)
@@ -281,6 +373,7 @@ impl LayoutEngine {
             .unwrap_or(LayoutRect::ZERO)
     }
 
+    /// Computes layout positions and sizes for the subtree rooted at `root`.
     pub fn compute(&mut self, root: LayoutNodeId, available_width: f32, available_height: f32) {
         self.layout_node(
             root,

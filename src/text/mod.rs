@@ -1,3 +1,5 @@
+//! Font discovery, OpenType shaping, glyph rasterization, and text primitive generation.
+
 pub mod font_db;
 pub mod rasterizer;
 pub mod shaper;
@@ -8,6 +10,7 @@ pub use shaper::{ShapedGlyph, ShapedText, TextShaper};
 
 use crate::render::{GlyphAtlas, RenderPrimitive};
 
+/// Generates and appends `RenderPrimitive::Glyph` commands for shaped text into a primitive batch.
 pub fn emit_text_glyphs(
     shaped: &ShapedText,
     logical_x: f32,

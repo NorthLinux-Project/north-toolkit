@@ -1,3 +1,5 @@
+//! HarfBuzz-grade OpenType text shaping, cluster tracking, kerning, and advance metrics via `rustybuzz`.
+
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -6,28 +8,45 @@ use lru::LruCache;
 
 use super::font_db::FontDatabase;
 
+/// An individual shaped glyph with positioned offsets and advance width.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapedGlyph {
+    /// Font face containing this glyph.
     pub face_id: ID,
+    /// OpenType glyph ID within the font face.
     pub glyph_id: u32,
+    /// Logical horizontal offset from start of line in points.
     pub x: f32,
+    /// Vertical offset from baseline in points.
     pub y: f32,
+    /// Bounding width in points.
     pub width: f32,
+    /// Bounding height in points.
     pub height: f32,
+    /// Horizontal advance width to the next glyph.
     pub x_advance: f32,
+    /// Character cluster index in the original UTF-8 string.
     pub cluster: u32,
 }
 
+/// A fully shaped line of text with global line height and bounding box metrics.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ShapedText {
+    /// Positioned glyphs in rendering order.
     pub glyphs: Vec<ShapedGlyph>,
+    /// Total horizontal advance width.
     pub width: f32,
+    /// Total line height (`ascent + descent + line_gap`).
     pub height: f32,
+    /// Ascent distance above the baseline.
     pub ascent: f32,
+    /// Descent distance below the baseline.
     pub descent: f32,
+    /// Font designer recommended line gap.
     pub line_gap: f32,
 }
 
+/// LRU-cached text shaping engine using `rustybuzz`.
 #[derive(Clone)]
 pub struct TextShaper {
     font_db: FontDatabase,
@@ -35,6 +54,7 @@ pub struct TextShaper {
 }
 
 impl TextShaper {
+    /// Creates a text shaper initialized with a font database and 1024-entry LRU cache.
     pub fn new(font_db: FontDatabase) -> Self {
         Self {
             font_db,
@@ -44,19 +64,23 @@ impl TextShaper {
         }
     }
 
+    /// Initializes a text shaper with default system fonts.
     pub fn default_system_font() -> Result<Self> {
         let font_db = FontDatabase::new()?;
         Ok(Self::new(font_db))
     }
 
+    /// Returns a reference to the underlying font database.
     pub fn font_db(&self) -> &FontDatabase {
         &self.font_db
     }
 
+    /// Shapes a text string at specified font size using the default system face.
     pub fn shape(&self, text: &str, font_size: f32) -> ShapedText {
         self.shape_with_face(text, font_size, self.font_db.default_face())
     }
 
+    /// Shapes a text string with a preferred font face, falling back per-character as needed.
     pub fn shape_with_face(&self, text: &str, font_size: f32, preferred_face: ID) -> ShapedText {
         if text.is_empty() {
             return ShapedText {
@@ -203,7 +227,6 @@ mod tests {
         let a = shaper.shape("A", 24.0);
         let v = shaper.shape("V", 24.0);
         let av = shaper.shape("AV", 24.0);
-        // With kerning, "AV" width is typically less than or equal to "A" width + "V" width
         assert!(av.width <= a.width + v.width + 0.001);
     }
 }

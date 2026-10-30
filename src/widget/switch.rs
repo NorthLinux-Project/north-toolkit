@@ -1,6 +1,9 @@
+//! Animated toggle switch widget with smooth thumb easing and focus indicator.
+
 use std::any::Any;
 
 use super::state::Property;
+use super::tooltip::Tooltip;
 use super::tree::Widget;
 use crate::animation::{Easing, Tween};
 use crate::event::{EventResponse, KeyEvent, MouseButton, PointerEvent};
@@ -9,16 +12,25 @@ use crate::render::{Border, CornerRadii, GlyphAtlas, RenderPrimitive};
 use crate::text::{GlyphRasterizer, TextShaper};
 use crate::theme::Theme;
 
+/// Animated boolean toggle switch widget.
 pub struct Switch {
+    /// Reactive checked state property.
     pub checked: Property<bool>,
+    /// Flexbox layout style.
     pub style: FlexStyle,
+    /// Whether the pointer is currently hovering over the switch track.
     pub is_hovered: bool,
+    /// Whether the switch currently has keyboard focus.
     pub is_focused: bool,
+    /// Callback executed when the switch state is toggled.
     pub on_toggle: Option<Box<dyn FnMut(bool)>>,
     thumb_tween: Tween<f32>,
+    /// Optional hover tooltip.
+    pub tooltip: Option<Tooltip>,
 }
 
 impl Switch {
+    /// Creates a new switch with specified initial checked state.
     pub fn new(checked: bool) -> Self {
         let initial_progress = if checked { 1.0 } else { 0.0 };
         Self {
@@ -32,14 +44,23 @@ impl Switch {
             is_focused: false,
             on_toggle: None,
             thumb_tween: Tween::new(initial_progress),
+            tooltip: None,
         }
     }
 
+    /// Attaches a hover tooltip to the switch widget.
+    pub fn with_tooltip<S: Into<String>>(mut self, text: S) -> Self {
+        self.tooltip = Some(Tooltip::new(text));
+        self
+    }
+
+    /// Attaches a state change callback handler.
     pub fn on_toggle<F: FnMut(bool) + 'static>(mut self, cb: F) -> Self {
         self.on_toggle = Some(Box::new(cb));
         self
     }
 
+    /// Toggles the checked state and starts the thumb slide easing animation.
     pub fn toggle(&mut self) {
         let new_val = !*self.checked.get();
         self.checked.set(new_val);
@@ -116,6 +137,7 @@ impl Widget for Switch {
         _atlas: &mut GlyphAtlas,
         _rasterizer: &GlyphRasterizer,
         _shaper: &TextShaper,
+        _vector_atlas: &mut crate::render::VectorAtlas,
         scale: f32,
     ) -> Vec<RenderPrimitive> {
         let mut prims = Vec::new();
@@ -176,6 +198,14 @@ impl Widget for Switch {
         ));
 
         prims
+    }
+
+    fn cursor_icon_at(&self, _rel_x: f32, _rel_y: f32) -> crate::event::CursorIcon {
+        crate::event::CursorIcon::Pointer
+    }
+
+    fn tooltip(&self) -> Option<Tooltip> {
+        self.tooltip.clone()
     }
 
     fn as_any(&self) -> &dyn Any {

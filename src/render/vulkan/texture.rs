@@ -1,19 +1,29 @@
+//! Vulkan GPU image allocation, memory binding, staging buffers, and pixel uploads.
+
 use anyhow::{Context, Result};
 use ash::vk;
 use ash::Device;
 
 use super::context::VulkanContext;
 
+/// A GPU-resident Vulkan 2D image with bound device memory and sampled image view.
 pub struct VulkanTexture {
+    /// Underlying Vulkan image handle.
     pub image: vk::Image,
+    /// Dedicated device memory bound to this image.
     pub memory: vk::DeviceMemory,
+    /// 2D image view for shader sampling.
     pub view: vk::ImageView,
+    /// Width in pixels.
     pub width: u32,
+    /// Height in pixels.
     pub height: u32,
+    /// Color format.
     pub format: vk::Format,
 }
 
 impl VulkanTexture {
+    /// Allocates and initializes a new 2D GPU image and image view.
     pub fn new_2d(
         context: &VulkanContext,
         width: u32,
@@ -83,6 +93,7 @@ impl VulkanTexture {
         })
     }
 
+    /// Uploads CPU pixel data to the GPU image via a temporary host-visible staging buffer.
     pub fn upload_data(
         &self,
         context: &VulkanContext,
@@ -225,6 +236,7 @@ impl VulkanTexture {
         Ok(())
     }
 
+    /// Destroys the image view, image, and frees bound device memory.
     pub fn destroy(&self, device: &Device) {
         unsafe {
             device.destroy_image_view(self.view, None);

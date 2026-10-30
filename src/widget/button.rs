@@ -1,30 +1,55 @@
+//! Interactive push button widget with hover/press animation, vector icon integration, and tooltips.
+
 use std::any::Any;
 
+use super::icon::IconName;
+use super::tooltip::Tooltip;
 use super::tree::Widget;
 use crate::animation::{Easing, Tween};
 use crate::event::{EventResponse, KeyEvent, MouseButton, PointerEvent};
 use crate::layout::{AlignItems, Dimension, EdgeInsets, FlexDirection, FlexStyle, JustifyContent, LayoutRect, MeasureFunc};
+use crate::render::vector::{StrokeStyle, VectorAtlas, VectorPath, VectorRasterizer};
 use crate::render::{Border, CornerRadii, GlyphAtlas, RenderPrimitive};
 use crate::text::{GlyphRasterizer, TextShaper};
 use crate::theme::Theme;
 
+/// Interactive push button supporting primary/secondary styles, leading/trailing icons, and animated transitions.
 pub struct Button {
+    /// Text label displayed on the button.
     pub label: String,
+    /// Font size in logical points.
     pub font_size: f32,
+    /// Flexbox layout style.
     pub style: FlexStyle,
+    /// Callback invoked when button is clicked.
     pub on_click: Option<Box<dyn FnMut()>>,
+    /// Whether the cursor is hovering over the button.
     pub is_hovered: bool,
+    /// Whether the button is actively pressed down.
     pub is_pressed: bool,
+    /// Whether the button has keyboard focus.
     pub is_focused: bool,
+    /// Explicit corner radii override.
     pub corner_radii: Option<CornerRadii>,
     color_tween: Tween<[f32; 4]>,
+    /// Base background color.
     pub base_color: [f32; 4],
+    /// Hover background color.
     pub hover_color: [f32; 4],
+    /// Pressed background color.
     pub pressed_color: [f32; 4],
+    /// Custom label text color.
     pub text_color: Option<[f32; 4]>,
+    /// Leading icon displayed before label.
+    pub icon: Option<IconName>,
+    /// Trailing icon displayed after label.
+    pub trailing_icon: Option<IconName>,
+    /// Optional hover tooltip.
+    pub tooltip: Option<Tooltip>,
 }
 
 impl Button {
+    /// Creates a new primary button with default accent styling.
     pub fn new<S: Into<String>>(label: S) -> Self {
         let base_color = [0.20, 0.45, 0.90, 1.0];
         Self {
@@ -49,9 +74,13 @@ impl Button {
             hover_color: [0.26, 0.52, 0.96, 1.0],
             pressed_color: [0.12, 0.34, 0.82, 1.0],
             text_color: None,
+            icon: None,
+            trailing_icon: None,
+            tooltip: None,
         }
     }
 
+    /// Creates a secondary button with subtle dark surface styling.
     pub fn secondary<S: Into<String>>(label: S) -> Self {
         let mut btn = Self::new(label);
         btn.base_color = [0.12, 0.12, 0.12, 1.0];
@@ -62,6 +91,19 @@ impl Button {
         btn
     }
 
+    /// Attaches a leading icon.
+    pub fn with_icon(mut self, icon: IconName) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    /// Attaches a trailing icon.
+    pub fn with_trailing_icon(mut self, icon: IconName) -> Self {
+        self.trailing_icon = Some(icon);
+        self
+    }
+
+    /// Customizes base, hover, and pressed background colors.
     pub fn with_colors(
         mut self,
         base: [f32; 4],
@@ -75,18 +117,27 @@ impl Button {
         self
     }
 
+    /// Registers a click callback closure.
     pub fn on_click<F: FnMut() + 'static>(mut self, cb: F) -> Self {
         self.on_click = Some(Box::new(cb));
         self
     }
 
+    /// Customizes internal button padding.
     pub fn with_padding(mut self, vertical: f32, horizontal: f32) -> Self {
         self.style.padding = EdgeInsets::symmetric(vertical, horizontal);
         self
     }
 
+    /// Customizes corner radii.
     pub fn with_corner_radii(mut self, radii: impl Into<CornerRadii>) -> Self {
         self.corner_radii = Some(radii.into());
+        self
+    }
+
+    /// Attaches a hover tooltip to the button.
+    pub fn with_tooltip<S: Into<String>>(mut self, text: S) -> Self {
+        self.tooltip = Some(Tooltip::new(text));
         self
     }
 }
@@ -100,8 +151,13 @@ impl Widget for Button {
         let shaped = shaper.shape(&self.label, self.font_size);
         let pad_h = self.style.padding.horizontal();
         let pad_v = self.style.padding.vertical();
-        let w = shaped.width + pad_h;
-        let h = shaped.height + pad_v;
+        let icon_extra_w = match (self.icon.is_some(), self.trailing_icon.is_some()) {
+            (true, true) => 32.0 + 12.0,
+            (true, false) | (false, true) => 16.0 + 6.0,
+            (false, false) => 0.0,
+        };
+        let w = shaped.width + icon_extra_w + pad_h;
+        let h = shaped.height.max(16.0) + pad_v;
         Some(Box::new(move |_avail_w, _avail_h| (w, h)))
     }
 
@@ -188,6 +244,7 @@ impl Widget for Button {
         atlas: &mut GlyphAtlas,
         rasterizer: &GlyphRasterizer,
         shaper: &TextShaper,
+        vector_atlas: &mut VectorAtlas,
         scale: f32,
     ) -> Vec<RenderPrimitive> {
         let mut prims = Vec::new();
@@ -224,14 +281,63 @@ impl Widget for Button {
         ));
 
         let shaped = shaper.shape(&self.label, self.font_size);
-        let text_logical_x = rect.x + (rect.width - shaped.width) / 2.0;
+        let icon_size = 16.0;
+        let icon_gap = 6.0;
+        let mut total_content_w = shaped.width;
+        if self.icon.is_some() {
+            total_content_w += icon_size + icon_gap;
+        }
+        if self.trailing_icon.is_some() {
+            total_content_w += icon_size + icon_gap;
+        }
+
         let press_offset_logical_y = if self.is_pressed { 1.0 } else { 0.0 };
-        let text_logical_baseline = rect.y + (rect.height - shaped.height) / 2.0 + shaped.ascent + press_offset_logical_y;
+        let center_y = rect.y + rect.height * 0.5 + press_offset_logical_y;
+        let mut curr_content_x = rect.x + (rect.width - total_content_w) / 2.0;
         let label_color = self.text_color.unwrap_or(theme.colors.on_primary);
 
+        if let Some(ic) = self.icon {
+            let icon_y = center_y - icon_size * 0.5;
+            let phys_size = ((icon_size * scale).round() as u32).max(1);
+            let stroke_w = (2.0 * (phys_size as f32 / 24.0)).max(1.3);
+            let uv_rect = vector_atlas.get_or_insert(ic as u64, phys_size, phys_size, || {
+                let path = VectorPath::parse_svg(ic.svg_path()).with_view_box(0.0, 0.0, 24.0, 24.0);
+                VectorRasterizer::rasterize(
+                    &path,
+                    phys_size,
+                    phys_size,
+                    None,
+                    Some(StrokeStyle {
+                        color: [1.0, 1.0, 1.0, 1.0],
+                        width: stroke_w,
+                        ..Default::default()
+                    }),
+                )
+            });
+
+            if let Some(uv) = uv_rect {
+                prims.push(RenderPrimitive::Rect {
+                    rect: [
+                        curr_content_x * scale,
+                        icon_y * scale,
+                        icon_size * scale,
+                        icon_size * scale,
+                    ],
+                    color: label_color,
+                    radii: CornerRadii::all(0.0),
+                    border: None,
+                    uv_rect: uv,
+                    use_texture: true,
+                });
+            }
+            curr_content_x += icon_size + icon_gap;
+        }
+
+        let cap_height = self.font_size * 0.70;
+        let text_logical_baseline = center_y + cap_height * 0.5;
         crate::text::emit_text_glyphs(
             &shaped,
-            text_logical_x,
+            curr_content_x,
             text_logical_baseline,
             self.font_size,
             label_color,
@@ -241,7 +347,52 @@ impl Widget for Button {
             &mut prims,
         );
 
+        if let Some(ic) = self.trailing_icon {
+            curr_content_x += shaped.width + icon_gap;
+            let icon_y = center_y - icon_size * 0.5;
+            let phys_size = ((icon_size * scale).round() as u32).max(1);
+            let stroke_w = (2.0 * (phys_size as f32 / 24.0)).max(1.3);
+            let uv_rect = vector_atlas.get_or_insert(ic as u64, phys_size, phys_size, || {
+                let path = VectorPath::parse_svg(ic.svg_path()).with_view_box(0.0, 0.0, 24.0, 24.0);
+                VectorRasterizer::rasterize(
+                    &path,
+                    phys_size,
+                    phys_size,
+                    None,
+                    Some(StrokeStyle {
+                        color: [1.0, 1.0, 1.0, 1.0],
+                        width: stroke_w,
+                        ..Default::default()
+                    }),
+                )
+            });
+
+            if let Some(uv) = uv_rect {
+                prims.push(RenderPrimitive::Rect {
+                    rect: [
+                        curr_content_x * scale,
+                        icon_y * scale,
+                        icon_size * scale,
+                        icon_size * scale,
+                    ],
+                    color: label_color,
+                    radii: CornerRadii::all(0.0),
+                    border: None,
+                    uv_rect: uv,
+                    use_texture: true,
+                });
+            }
+        }
+
         prims
+    }
+
+    fn cursor_icon_at(&self, _rel_x: f32, _rel_y: f32) -> crate::event::CursorIcon {
+        crate::event::CursorIcon::Pointer
+    }
+
+    fn tooltip(&self) -> Option<Tooltip> {
+        self.tooltip.clone()
     }
 
     fn as_any(&self) -> &dyn Any {

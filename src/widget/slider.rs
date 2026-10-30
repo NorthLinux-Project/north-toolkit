@@ -1,6 +1,9 @@
+//! Continuous and stepped slider input widget with draggable thumb and keyboard adjustment.
+
 use std::any::Any;
 
 use super::state::Property;
+use super::tooltip::Tooltip;
 use super::tree::Widget;
 use crate::event::{EventResponse, KeyEvent, MouseButton, PointerEvent};
 use crate::layout::{Dimension, FlexStyle, LayoutRect, MeasureFunc};
@@ -8,19 +11,32 @@ use crate::render::{Border, CornerRadii, GlyphAtlas, RenderPrimitive};
 use crate::text::{GlyphRasterizer, TextShaper};
 use crate::theme::Theme;
 
+/// Horizontal slider widget for selecting numeric values within a defined range.
 pub struct Slider {
+    /// Minimum allowed value.
     pub min: f32,
+    /// Maximum allowed value.
     pub max: f32,
+    /// Reactive current value property.
     pub value: Property<f32>,
+    /// Optional discrete quantization step interval.
     pub step: Option<f32>,
+    /// Flexbox layout style.
     pub style: FlexStyle,
+    /// Whether the pointer is hovering over the slider.
     pub is_hovered: bool,
+    /// Whether the user is actively dragging the slider thumb.
     pub is_dragging: bool,
+    /// Whether the slider currently has keyboard focus.
     pub is_focused: bool,
+    /// Callback executed when the value changes.
     pub on_change: Option<Box<dyn FnMut(f32)>>,
+    /// Optional hover tooltip.
+    pub tooltip: Option<Tooltip>,
 }
 
 impl Slider {
+    /// Creates a new slider with specified bounds and initial value.
     pub fn new(min: f32, max: f32, initial_value: f32) -> Self {
         let clamped = initial_value.clamp(min, max);
         Self {
@@ -37,19 +53,29 @@ impl Slider {
             is_dragging: false,
             is_focused: false,
             on_change: None,
+            tooltip: None,
         }
     }
 
+    /// Sets the discrete quantization step size.
     pub fn with_step(mut self, step: f32) -> Self {
         self.step = Some(step);
         self
     }
 
+    /// Sets the width of the slider track.
     pub fn with_width(mut self, width: f32) -> Self {
         self.style.width = Dimension::Points(width);
         self
     }
 
+    /// Attaches a hover tooltip to the slider widget.
+    pub fn with_tooltip<S: Into<String>>(mut self, text: S) -> Self {
+        self.tooltip = Some(Tooltip::new(text));
+        self
+    }
+
+    /// Attaches a value change callback handler.
     pub fn on_change<F: FnMut(f32) + 'static>(mut self, cb: F) -> Self {
         self.on_change = Some(Box::new(cb));
         self
@@ -165,6 +191,7 @@ impl Widget for Slider {
         _atlas: &mut GlyphAtlas,
         _rasterizer: &GlyphRasterizer,
         _shaper: &TextShaper,
+        _vector_atlas: &mut crate::render::VectorAtlas,
         scale: f32,
     ) -> Vec<RenderPrimitive> {
         let mut prims = Vec::new();
@@ -236,6 +263,18 @@ impl Widget for Slider {
         ));
 
         prims
+    }
+
+    fn cursor_icon_at(&self, _rel_x: f32, _rel_y: f32) -> crate::event::CursorIcon {
+        if self.is_dragging {
+            crate::event::CursorIcon::Grabbing
+        } else {
+            crate::event::CursorIcon::Pointer
+        }
+    }
+
+    fn tooltip(&self) -> Option<Tooltip> {
+        self.tooltip.clone()
     }
 
     fn as_any(&self) -> &dyn Any {
