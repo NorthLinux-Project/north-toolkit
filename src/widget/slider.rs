@@ -327,6 +327,7 @@ mod tests {
             keysym: 0xff51,
             text: None,
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert_eq!(*slider.value.get(), curr - 10.0);
     }

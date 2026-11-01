@@ -468,8 +468,15 @@ impl ActiveModal {
 
     /// Dispatches a keyboard event to handle focus navigation (Tab/Shift-Tab), activation (Enter/Space), and cancellation (Escape).
     pub fn dispatch_key_event(&mut self, event: &KeyEvent) -> Option<DialogResponse> {
-        if let KeyEvent::KeyDown { key, keysym, modifiers, .. } = event {
-            if *keysym == 0xff1b || key == "Escape" {
+        if let KeyEvent::KeyDown {
+            key,
+            keysym,
+            modifiers,
+            is_repeat,
+            ..
+        } = event
+        {
+            if !*is_repeat && (*keysym == 0xff1b || key == "Escape") {
                 if self.dialog.dismiss_on_escape {
                     let resp = DialogResponse::Cancel;
                     self.close(resp);
@@ -488,7 +495,9 @@ impl ActiveModal {
                         self.focused_button = (self.focused_button + 1) % total;
                     }
                 }
-            } else if *keysym == 0xff0d || *keysym == 0x20 || key == "Return" || key == "Space" {
+            } else if !*is_repeat
+                && (*keysym == 0xff0d || *keysym == 0x20 || key == "Return" || key == "Space")
+            {
                 if let Some(btn) = self.dialog.buttons.get(self.focused_button) {
                     let resp = btn.response;
                     self.close(resp);
@@ -729,6 +738,7 @@ mod tests {
             keysym: 0xff09,
             text: None,
             modifiers: Default::default(),
+            is_repeat: false,
         };
         modal.dispatch_key_event(&tab_evt);
         assert_eq!(modal.focused_button, 0);
@@ -739,6 +749,7 @@ mod tests {
             keysym: 0xff1b,
             text: None,
             modifiers: Default::default(),
+            is_repeat: false,
         };
         let resp = modal.dispatch_key_event(&esc_evt);
         assert_eq!(resp, Some(DialogResponse::Cancel));

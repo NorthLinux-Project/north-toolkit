@@ -341,6 +341,13 @@ impl LayoutEngine {
         }
     }
 
+    /// Clears any intrinsic measurement function from a node.
+    pub fn clear_measure(&mut self, node: LayoutNodeId) {
+        if let Some(Some(n)) = self.nodes.get_mut(node.0) {
+            n.measure = None;
+        }
+    }
+
     /// Updates the style configuration for an existing node.
     pub fn set_style(&mut self, node: LayoutNodeId, style: FlexStyle) {
         if let Some(Some(n)) = self.nodes.get_mut(node.0) {

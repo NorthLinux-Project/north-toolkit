@@ -3,7 +3,8 @@
 use std::any::Any;
 
 use crate::event::{
-    CursorIcon, EventDispatcher, EventResponse, KeyEvent, MouseButton, PointerEvent, WidgetId,
+    CursorIcon, EventDispatcher, EventResponse, ImeEvent, KeyEvent, MouseButton, PointerEvent,
+    WidgetId,
 };
 use crate::layout::{FlexStyle, LayoutEngine, LayoutNodeId, LayoutRect, MeasureFunc};
 use crate::render::{Border, CornerRadii, GlyphAtlas, RenderPrimitive, VectorAtlas};
@@ -73,6 +74,18 @@ pub trait Widget: Any {
     fn on_key_event(&mut self, _event: &KeyEvent) -> EventResponse {
         EventResponse::Ignored
     }
+    /// Handles Wayland input method composition/commit events when this widget has focus.
+    fn on_ime_event(&mut self, _event: &ImeEvent) -> EventResponse {
+        EventResponse::Ignored
+    }
+    /// Returns the surface-local logical cursor rectangle if this widget accepts IME input.
+    fn ime_cursor_rect(&self, _rect: LayoutRect) -> Option<LayoutRect> {
+        None
+    }
+    /// Returns `true` if this widget currently holds an uncommitted IME preedit composition.
+    fn has_ime_preedit(&self) -> bool {
+        false
+    }
     /// Called when the widget gains or loses keyboard focus.
     fn on_focus_change(&mut self, _focused: bool) {}
     /// Advances internal widget animations. Returns `true` if a repaint is required.
@@ -101,6 +114,23 @@ pub trait Widget: Any {
     }
     /// Returns tooltip configuration if hovered.
     fn tooltip(&self) -> Option<super::tooltip::Tooltip> {
+        None
+    }
+    /// Returns `true` if this widget is visible. Inactive widgets are skipped during hit testing, focus traversal, and rendering.
+    fn is_visible(&self) -> bool {
+        true
+    }
+    /// Returns which child widget ID is active if this container manages exclusive child visibility (e.g. `Tabs`).
+    fn active_child(&self) -> Option<WidgetId> {
+        None
+    }
+    /// Allows container widgets (like `SplitView`) to override the flex layout style of their direct children.
+    fn child_layout_style(
+        &self,
+        _child_index: usize,
+        _child_id: WidgetId,
+        _current_style: &FlexStyle,
+    ) -> Option<FlexStyle> {
         None
     }
     /// Downcasts to `&dyn Any`.
@@ -191,9 +221,11 @@ pub struct WidgetNode {
     pub layout_node: LayoutNodeId,
     /// Whether this node requires style/measure resynchronization.
     pub dirty: bool,
+    /// Whether this node is visible.
+    pub visible: bool,
 }
 
-/// The flat arena storing the retained widget hierarchy, active modal, and tooltips.
+/// The flat arena storing the retained widget hierarchy, active modal, tooltips, and toasts.
 pub struct WidgetTree {
     pub nodes: Vec<Option<WidgetNode>>,
     root: Option<WidgetId>,
@@ -205,6 +237,8 @@ pub struct WidgetTree {
     pub tooltip_manager: super::tooltip::TooltipManager,
     pub active_modal: Option<super::dialog::ActiveModal>,
     pub modal_handle: super::dialog::ModalHandle,
+    pub toast_manager: super::toast::ToastManager,
+    pub toast_handle: super::toast::ToastHandle,
 }
 
 impl WidgetTree {
@@ -221,6 +255,8 @@ impl WidgetTree {
             tooltip_manager: super::tooltip::TooltipManager::new(),
             active_modal: None,
             modal_handle: super::dialog::ModalHandle::new(),
+            toast_manager: super::toast::ToastManager::new(),
+            toast_handle: super::toast::ToastHandle::new(),
         }
     }
 
@@ -258,6 +294,15 @@ impl WidgetTree {
 
     /// Mounts and opens an active modal dialog.
     pub fn open_modal(&mut self, dialog: super::dialog::Dialog) {
+        for node in self.nodes.iter_mut().flatten() {
+            if node.widget.has_ime_preedit() {
+                node.widget.on_ime_event(&ImeEvent::Preedit {
+                    text: String::new(),
+                    cursor_begin: 0,
+                    cursor_end: 0,
+                });
+            }
+        }
         self.active_modal = Some(super::dialog::ActiveModal::new(dialog));
         self.dirty = true;
     }
@@ -273,6 +318,39 @@ impl WidgetTree {
     /// Returns `true` if a modal dialog is currently open.
     pub fn is_modal_active(&self) -> bool {
         self.active_modal.is_some()
+    }
+
+    /// Clones the thread-safe `ToastHandle` for dispatching toast notifications.
+    pub fn toast_handle(&self) -> super::toast::ToastHandle {
+        self.toast_handle.clone()
+    }
+
+    /// Checks and mounts any pending toasts queued via `ToastHandle`.
+    pub fn check_pending_toasts(&mut self) {
+        for toast in self.toast_handle.take() {
+            self.toast_manager.push(toast);
+            self.dirty = true;
+        }
+    }
+
+    /// Sets whether a widget node is visible. Inactive widgets are skipped during hit testing, focus, and rendering.
+    pub fn set_visible(&mut self, id: WidgetId, visible: bool) {
+        if let Some(Some(node)) = self.nodes.get_mut(id.0) {
+            if node.visible != visible {
+                node.visible = visible;
+                node.dirty = true;
+                self.dirty = true;
+            }
+        }
+    }
+
+    /// Returns `true` if the widget node exists and is visible.
+    pub fn is_visible(&self, id: WidgetId) -> bool {
+        self.nodes
+            .get(id.0)
+            .and_then(|n| n.as_ref())
+            .map(|n| n.visible && n.widget.is_visible())
+            .unwrap_or(false)
     }
 
     /// Returns the root widget identifier, if set.
@@ -302,6 +380,7 @@ impl WidgetTree {
             parent,
             layout_node,
             dirty: true,
+            visible: true,
         };
 
         let mut empty_index = None;
@@ -365,8 +444,25 @@ impl WidgetTree {
 
     /// Synchronizes flex styles and intrinsic measurements to the flexbox `LayoutEngine`.
     pub fn sync_layout(&mut self, engine: &mut LayoutEngine, shaper: &TextShaper) {
+        let zero_style = FlexStyle {
+            width: crate::layout::Dimension::Points(0.0),
+            height: crate::layout::Dimension::Points(0.0),
+            min_width: Some(0.0),
+            min_height: Some(0.0),
+            max_width: Some(0.0),
+            max_height: Some(0.0),
+            padding: crate::layout::EdgeInsets::ZERO,
+            margin: crate::layout::EdgeInsets::ZERO,
+            gap: 0.0,
+            ..Default::default()
+        };
+
         for node in self.nodes.iter_mut().flatten() {
-            if node.dirty {
+            if !node.visible || !node.widget.is_visible() {
+                engine.set_style(node.layout_node, zero_style.clone());
+                engine.set_measure(node.layout_node, Box::new(|_, _| (0.0, 0.0)));
+                node.dirty = false;
+            } else if node.dirty {
                 engine.set_style(node.layout_node, node.widget.layout_style());
                 if let Some(measure_fn) = node.widget.measure(shaper) {
                     engine.set_measure(node.layout_node, measure_fn);
@@ -374,12 +470,67 @@ impl WidgetTree {
                 node.dirty = false;
             }
         }
+
+        let mut child_overrides = Vec::new();
+        let mut active_children_to_restore = Vec::new();
+        let mut inactive_children_to_zero = Vec::new();
+
+        for slot in self.nodes.iter().flatten() {
+            if let Some(active_id) = slot.widget.active_child() {
+                for &child_id in &slot.children {
+                    if child_id == active_id {
+                        active_children_to_restore.push(child_id);
+                    } else {
+                        inactive_children_to_zero.push(child_id);
+                    }
+                }
+            }
+
+            for (child_idx, &child_id) in slot.children.iter().enumerate() {
+                if let Some(Some(child_node)) = self.nodes.get(child_id.0) {
+                    let base_style = child_node.widget.layout_style();
+                    if let Some(style) =
+                        slot.widget.child_layout_style(child_idx, child_id, &base_style)
+                    {
+                        child_overrides.push((child_id, style));
+                    }
+                }
+            }
+        }
+
+        for active_id in active_children_to_restore {
+            if let Some(Some(child_node)) = self.nodes.get(active_id.0) {
+                if child_node.visible && child_node.widget.is_visible() {
+                    engine.set_style(child_node.layout_node, child_node.widget.layout_style());
+                    if let Some(measure_fn) = child_node.widget.measure(shaper) {
+                        engine.set_measure(child_node.layout_node, measure_fn);
+                    } else {
+                        engine.clear_measure(child_node.layout_node);
+                    }
+                }
+            }
+        }
+
+        for inactive_id in inactive_children_to_zero {
+            if let Some(Some(child_node)) = self.nodes.get(inactive_id.0) {
+                engine.set_style(child_node.layout_node, zero_style.clone());
+                engine.clear_measure(child_node.layout_node);
+            }
+        }
+
+        for (child_id, style) in child_overrides {
+            if let Some(Some(child_node)) = self.nodes.get(child_id.0) {
+                engine.set_style(child_node.layout_node, style);
+            }
+        }
+
         self.dirty = false;
     }
 
     /// Advances running animations across all widgets and overlays. Returns `true` if repaint is needed.
     pub fn tick_animations(&mut self, delta_ms: f32) -> bool {
         self.check_pending_modal();
+        self.check_pending_toasts();
         let mut needs_repaint = false;
         for node in self.nodes.iter_mut().flatten() {
             if node.widget.tick_animation(delta_ms) {
@@ -387,6 +538,9 @@ impl WidgetTree {
             }
         }
         if self.tooltip_manager.tick(delta_ms) {
+            needs_repaint = true;
+        }
+        if self.toast_manager.tick(delta_ms) {
             needs_repaint = true;
         }
         if let Some(modal) = &mut self.active_modal {
@@ -419,6 +573,10 @@ impl WidgetTree {
         offset: (f32, f32),
     ) -> Option<WidgetId> {
         let node = self.nodes.get(current.0)?.as_ref()?;
+        if !node.visible || !node.widget.is_visible() {
+            return None;
+        }
+
         let rect = engine.get_rect(node.layout_node);
         let screen_rect = LayoutRect::new(
             rect.x + offset.0,
@@ -434,9 +592,17 @@ impl WidgetTree {
         let scroll = node.widget.scroll_offset();
         let child_offset = (offset.0 - scroll.0, offset.1 - scroll.1);
 
-        for &child in node.children.iter().rev() {
-            if let Some(hit) = self.hit_test_recursive(child, engine, px, py, child_offset) {
-                return Some(hit);
+        if let Some(active_id) = node.widget.active_child() {
+            if node.children.contains(&active_id) {
+                if let Some(hit) = self.hit_test_recursive(active_id, engine, px, py, child_offset) {
+                    return Some(hit);
+                }
+            }
+        } else {
+            for &child in node.children.iter().rev() {
+                if let Some(hit) = self.hit_test_recursive(child, engine, px, py, child_offset) {
+                    return Some(hit);
+                }
             }
         }
 
@@ -451,6 +617,7 @@ impl WidgetTree {
         event: &PointerEvent,
     ) -> EventResponse {
         self.check_pending_modal();
+        self.check_pending_toasts();
         let (px, py) = event.position();
         dispatcher.mouse_pos = (px, py);
 
@@ -458,6 +625,30 @@ impl WidgetTree {
             let _ = modal.dispatch_pointer_event(event);
             self.dirty = true;
             return EventResponse::Handled;
+        }
+
+        let (win_w, win_h) = self
+            .root
+            .and_then(|r| self.nodes.get(r.0).and_then(|n| n.as_ref()))
+            .map(|n| {
+                let r = engine.get_rect(n.layout_node);
+                (r.width.max(100.0), r.height.max(100.0))
+            })
+            .unwrap_or((800.0, 600.0));
+
+        if !self.toast_manager.is_empty() {
+            let toast_resp = self.toast_manager.dispatch_pointer_event(event, win_w, win_h);
+            if toast_resp == EventResponse::Handled {
+                if let Some(prev) = dispatcher.hover.take() {
+                    let rect = self.node_screen_rect(prev, engine);
+                    if let Some(Some(node)) = self.nodes.get_mut(prev.0) {
+                        let _ = node.widget.on_pointer_event(event, rect);
+                    }
+                }
+                self.tooltip_manager.handle_hover_change(None, LayoutRect::ZERO, None);
+                self.dirty = true;
+                return EventResponse::Handled;
+            }
         }
 
         if self.csd_enabled && !self.is_maximized {
@@ -625,11 +816,20 @@ impl WidgetTree {
 
     fn collect_focusable_recursive(&self, current: WidgetId, list: &mut Vec<WidgetId>) {
         if let Some(Some(node)) = self.nodes.get(current.0) {
+            if !node.visible || !node.widget.is_visible() {
+                return;
+            }
             if node.widget.is_focusable() {
                 list.push(current);
             }
-            for &child in &node.children {
-                self.collect_focusable_recursive(child, list);
+            if let Some(active_id) = node.widget.active_child() {
+                if node.children.contains(&active_id) {
+                    self.collect_focusable_recursive(active_id, list);
+                }
+            } else {
+                for &child in &node.children {
+                    self.collect_focusable_recursive(child, list);
+                }
             }
         }
     }
@@ -648,7 +848,7 @@ impl WidgetTree {
         }
 
         if let KeyEvent::KeyDown { key, modifiers, .. } = event {
-            if key == "Tab" {
+            if key == "Tab" && !self.focused_has_ime_preedit(dispatcher) {
                 let focusable = self.focusable_widgets();
                 if !focusable.is_empty() {
                     let current_idx = dispatcher
@@ -686,10 +886,79 @@ impl WidgetTree {
 
         if let Some(focus_id) = dispatcher.focus {
             if let Some(Some(node)) = self.nodes.get_mut(focus_id.0) {
-                return node.widget.on_key_event(event);
+                let resp = node.widget.on_key_event(event);
+                if resp == EventResponse::Handled {
+                    self.dirty = true;
+                }
+                return resp;
             }
         }
         EventResponse::Ignored
+    }
+
+    /// Dispatches IME composition/commit events to the currently focused widget.
+    pub fn dispatch_ime_event(
+        &mut self,
+        dispatcher: &EventDispatcher,
+        event: &ImeEvent,
+    ) -> EventResponse {
+        self.check_pending_modal();
+        if self.active_modal.is_some() {
+            return EventResponse::Ignored;
+        }
+        if let Some(focus_id) = dispatcher.focus {
+            if let Some(Some(node)) = self.nodes.get_mut(focus_id.0) {
+                let resp = node.widget.on_ime_event(event);
+                if resp == EventResponse::Handled {
+                    self.dirty = true;
+                }
+                return resp;
+            }
+        }
+        EventResponse::Ignored
+    }
+
+    /// Queries the surface-local logical cursor rectangle for the focused widget if IME-capable.
+    pub fn ime_cursor_rect(
+        &self,
+        engine: &LayoutEngine,
+        dispatcher: &EventDispatcher,
+    ) -> Option<LayoutRect> {
+        if self.active_modal.is_some() {
+            return None;
+        }
+        let focus_id = dispatcher.focus?;
+        let node = self.nodes.get(focus_id.0)?.as_ref()?;
+        let screen_rect = self.node_screen_rect(focus_id, engine);
+        node.widget.ime_cursor_rect(screen_rect)
+    }
+
+    /// Returns `true` if the currently focused widget holds an uncommitted IME preedit composition.
+    pub fn focused_has_ime_preedit(&self, dispatcher: &EventDispatcher) -> bool {
+        dispatcher
+            .focus
+            .and_then(|id| self.nodes.get(id.0))
+            .and_then(|slot| slot.as_ref())
+            .map(|node| node.widget.has_ime_preedit())
+            .unwrap_or(false)
+    }
+
+    /// Clears any active IME preedit composition on the currently focused widget.
+    pub fn clear_focused_ime_preedit(&mut self, dispatcher: &EventDispatcher) -> bool {
+        if let Some(focus_id) = dispatcher.focus {
+            if let Some(Some(node)) = self.nodes.get_mut(focus_id.0) {
+                if node.widget.has_ime_preedit() {
+                    node.widget.on_ime_event(&ImeEvent::Preedit {
+                        text: String::new(),
+                        cursor_begin: 0,
+                        cursor_end: 0,
+                    });
+                    self.dirty = true;
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Takes any popup request emitted by child widgets during event dispatching.
@@ -743,8 +1012,22 @@ impl WidgetTree {
 
     /// Computes the active cursor icon shape at the current mouse position.
     pub fn query_cursor_icon(&self, engine: &LayoutEngine, dispatcher: &EventDispatcher) -> CursorIcon {
+        let (px, py) = dispatcher.mouse_pos;
+
+        let (win_w, win_h) = self
+            .root
+            .and_then(|r| self.nodes.get(r.0).and_then(|n| n.as_ref()))
+            .map(|n| {
+                let r = engine.get_rect(n.layout_node);
+                (r.width.max(100.0), r.height.max(100.0))
+            })
+            .unwrap_or((800.0, 600.0));
+
+        if let Some(icon) = self.toast_manager.cursor_icon_at(px, py, win_w, win_h) {
+            return icon;
+        }
+
         if let Some(modal) = &self.active_modal {
-            let (px, py) = dispatcher.mouse_pos;
             return modal.cursor_icon_at(px, py);
         }
 
@@ -896,6 +1179,29 @@ impl WidgetTree {
             }
         }
 
+        if !self.toast_manager.is_empty() {
+            let (win_w, win_h) = self
+                .root
+                .and_then(|r| self.nodes.get(r.0).and_then(|n| n.as_ref()))
+                .map(|n| {
+                    let r = engine.get_rect(n.layout_node);
+                    (r.width.max(100.0), r.height.max(100.0))
+                })
+                .unwrap_or((800.0, 600.0));
+
+            let toast_prims = self.toast_manager.paint(
+                win_w,
+                win_h,
+                scale,
+                theme,
+                atlas,
+                rasterizer,
+                shaper,
+                vector_atlas,
+            );
+            primitives.extend(toast_prims);
+        }
+
         primitives
     }
 
@@ -916,6 +1222,10 @@ impl WidgetTree {
             Some(n) => n,
             None => return,
         };
+
+        if !node.visible || !node.widget.is_visible() {
+            return;
+        }
 
         let rect = engine.get_rect(node.layout_node);
         let screen_rect = LayoutRect::new(
@@ -939,19 +1249,36 @@ impl WidgetTree {
         let scroll = node.widget.scroll_offset();
         let child_offset = (offset.0 - scroll.0, offset.1 - scroll.1);
 
-        for &child in &node.children {
-            self.paint_recursive(
-                child,
-                engine,
-                theme,
-                atlas,
-                rasterizer,
-                shaper,
-                vector_atlas,
-                scale,
-                child_offset,
-                primitives,
-            );
+        if let Some(active_id) = node.widget.active_child() {
+            if node.children.contains(&active_id) {
+                self.paint_recursive(
+                    active_id,
+                    engine,
+                    theme,
+                    atlas,
+                    rasterizer,
+                    shaper,
+                    vector_atlas,
+                    scale,
+                    child_offset,
+                    primitives,
+                );
+            }
+        } else {
+            for &child in &node.children {
+                self.paint_recursive(
+                    child,
+                    engine,
+                    theme,
+                    atlas,
+                    rasterizer,
+                    shaper,
+                    vector_atlas,
+                    scale,
+                    child_offset,
+                    primitives,
+                );
+            }
         }
 
         let mut after_prims = node.widget.paint_after(
@@ -1157,6 +1484,7 @@ mod tests {
             keysym: 0xff09,
             text: None,
             modifiers: Modifiers::default(),
+            is_repeat: false,
         };
         tree.dispatch_key_event(&mut dispatcher, &tab_evt);
         assert_eq!(dispatcher.focus, Some(btn1_id));
@@ -1178,6 +1506,7 @@ mod tests {
                 shift: true,
                 ..Default::default()
             },
+            is_repeat: false,
         };
         tree.dispatch_key_event(&mut dispatcher, &shift_tab_evt);
         assert_eq!(dispatcher.focus, Some(btn2_id));
@@ -1564,5 +1893,265 @@ mod tests {
 
         let actions = tree.take_window_actions();
         assert_eq!(actions, vec![WindowAction::Close]);
+    }
+
+    #[test]
+    fn test_widget_tree_toast_overlay_integration() {
+        let mut tree = WidgetTree::new();
+        let mut engine = LayoutEngine::new();
+        let mut dispatcher = EventDispatcher::new();
+
+        let root_container = Container::new(FlexStyle {
+            width: Dimension::Points(800.0),
+            height: Dimension::Points(600.0),
+            ..Default::default()
+        });
+        tree.add_widget(&mut engine, Box::new(root_container), None);
+        engine.compute(tree.nodes[0].as_ref().unwrap().layout_node, 800.0, 600.0);
+
+        let handle = tree.toast_handle();
+        handle.info("Build succeeded");
+
+        assert!(tree.toast_manager.is_empty());
+        tree.check_pending_toasts();
+        assert_eq!(tree.toast_manager.toasts.len(), 1);
+
+        // Advance through enter animation
+        tree.tick_animations(250.0);
+        assert_eq!(tree.toast_manager.toasts[0].phase, crate::widget::ToastPhase::Visible);
+
+        // Click outside toast: ignored by toast manager
+        let click_outside = PointerEvent::Down {
+            x: 50.0,
+            y: 50.0,
+            button: MouseButton::Left,
+        };
+        let resp = tree.dispatch_pointer_event(&mut dispatcher, &engine, &click_outside);
+        assert_eq!(resp, EventResponse::Ignored);
+
+        // Click close button on toast card at top-right
+        let rects = tree.toast_manager.toast_rects(800.0, 600.0);
+        let close_rect = rects[0].2.unwrap();
+        let click_close = PointerEvent::Down {
+            x: close_rect.x + 2.0,
+            y: close_rect.y + 2.0,
+            button: MouseButton::Left,
+        };
+        let resp = tree.dispatch_pointer_event(&mut dispatcher, &engine, &click_close);
+        assert_eq!(resp, EventResponse::Handled);
+        assert_eq!(tree.toast_manager.toasts[0].phase, crate::widget::ToastPhase::Exiting);
+
+        // Advance through exit animation: toast removed
+        tree.tick_animations(200.0);
+        assert!(tree.toast_manager.is_empty());
+    }
+
+    #[test]
+    fn test_widget_tree_visibility_and_active_child() {
+        use crate::layout::FlexDirection;
+        let mut tree = WidgetTree::new();
+        let mut engine = LayoutEngine::new();
+        let font_db = crate::text::font_db::FontDatabase::new().unwrap();
+        let shaper = TextShaper::new(font_db);
+
+        let root_container = Container::new(FlexStyle {
+            direction: FlexDirection::Column,
+            width: Dimension::Points(800.0),
+            height: Dimension::Points(600.0),
+            ..Default::default()
+        });
+        let root = tree.add_widget(&mut engine, Box::new(root_container), None);
+
+        let btn1 = Button::new("Button 1");
+        let btn1_id = tree.add_widget(&mut engine, Box::new(btn1), Some(root));
+
+        let btn2 = Button::new("Button 2");
+        let btn2_id = tree.add_widget(&mut engine, Box::new(btn2), Some(root));
+
+        tree.sync_layout(&mut engine, &shaper);
+        assert!(tree.is_visible(btn1_id));
+        assert!(tree.is_visible(btn2_id));
+        let focusable = tree.focusable_widgets();
+        assert_eq!(focusable.len(), 2);
+
+        // Hide btn2
+        tree.set_visible(btn2_id, false);
+        assert!(!tree.is_visible(btn2_id));
+
+        tree.sync_layout(&mut engine, &shaper);
+        let focusable_after = tree.focusable_widgets();
+        assert_eq!(focusable_after, vec![btn1_id]);
+
+        let r2 = engine.get_rect(tree.nodes[btn2_id.0].as_ref().unwrap().layout_node);
+        assert_eq!(r2.width, 0.0);
+        assert_eq!(r2.height, 0.0);
+    }
+
+    #[test]
+    fn test_tabs_sync_layout_page_switching() {
+        use crate::layout::FlexDirection;
+        use crate::widget::{TabBarOrientation, Tabs};
+
+        let mut tree = WidgetTree::new();
+        let mut engine = LayoutEngine::new();
+        let font_db = crate::text::font_db::FontDatabase::new().unwrap();
+        let shaper = TextShaper::new(font_db);
+
+        let root_container = Container::new(FlexStyle {
+            direction: FlexDirection::Column,
+            width: Dimension::Points(800.0),
+            height: Dimension::Points(600.0),
+            ..Default::default()
+        });
+        let root = tree.add_widget(&mut engine, Box::new(root_container), None);
+
+        let tabs = Tabs::new(TabBarOrientation::Horizontal);
+        let tabs_id = tree.add_widget(&mut engine, Box::new(tabs), Some(root));
+
+        let p1 = Container::new(FlexStyle {
+            width: Dimension::Percent(100.0),
+            height: Dimension::Points(200.0),
+            ..Default::default()
+        });
+        let p1_id = tree.add_widget(&mut engine, Box::new(p1), Some(tabs_id));
+
+        let p2 = Container::new(FlexStyle {
+            width: Dimension::Percent(100.0),
+            height: Dimension::Points(300.0),
+            ..Default::default()
+        });
+        let p2_id = tree.add_widget(&mut engine, Box::new(p2), Some(tabs_id));
+
+        tree.get_widget_mut::<Tabs>(tabs_id)
+            .unwrap()
+            .add_tab("Tab 1", p1_id)
+            .add_tab("Tab 2", p2_id);
+
+        tree.sync_layout(&mut engine, &shaper);
+        let tabs_node = tree.nodes[tabs_id.0].as_ref().unwrap().layout_node;
+        engine.compute(tabs_node, 800.0, 600.0);
+
+        let r1 = engine.get_rect(tree.nodes[p1_id.0].as_ref().unwrap().layout_node);
+        let r2 = engine.get_rect(tree.nodes[p2_id.0].as_ref().unwrap().layout_node);
+        assert!(r1.height > 0.0);
+        assert_eq!(r2.height, 0.0);
+
+        // Switch to Tab 2
+        tree.get_widget_mut::<Tabs>(tabs_id).unwrap().select_tab(1);
+        tree.sync_layout(&mut engine, &shaper);
+        engine.compute(tabs_node, 800.0, 600.0);
+
+        let r1_after = engine.get_rect(tree.nodes[p1_id.0].as_ref().unwrap().layout_node);
+        let r2_after = engine.get_rect(tree.nodes[p2_id.0].as_ref().unwrap().layout_node);
+        assert_eq!(r1_after.height, 0.0);
+        assert!(r2_after.height > 0.0);
+    }
+
+    #[test]
+    fn test_showcase_split_view_inside_tabs_layout_positions() {
+        use crate::layout::{AlignItems, Dimension, EdgeInsets, FlexDirection, FlexStyle, JustifyContent};
+        use crate::widget::{Container, SplitOrientation, SplitView, TabBarOrientation, Tabs, Titlebar};
+
+        let mut tree = WidgetTree::new();
+        let mut engine = LayoutEngine::new();
+        let font_db = crate::text::font_db::FontDatabase::new().unwrap();
+        let shaper = TextShaper::new(font_db);
+
+        let root_container = Container::new(FlexStyle {
+            direction: FlexDirection::Column,
+            justify_content: JustifyContent::FlexStart,
+            align_items: AlignItems::Stretch,
+            width: Dimension::Percent(100.0),
+            height: Dimension::Percent(100.0),
+            ..Default::default()
+        });
+        let root = tree.add_widget(&mut engine, Box::new(root_container), None);
+
+        let titlebar = Titlebar::new("North Toolkit Showcase");
+        let titlebar_id = tree.add_widget(&mut engine, Box::new(titlebar), Some(root));
+
+        let content_container = Container::new(FlexStyle {
+            direction: FlexDirection::Column,
+            justify_content: JustifyContent::FlexStart,
+            align_items: AlignItems::Stretch,
+            padding: EdgeInsets::symmetric(16.0, 24.0),
+            gap: 12.0,
+            flex_grow: 1.0,
+            width: Dimension::Percent(100.0),
+            ..Default::default()
+        });
+        let content = tree.add_widget(&mut engine, Box::new(content_container), Some(root));
+
+        let mut tabs = Tabs::new(TabBarOrientation::Horizontal);
+        tabs.style.height = Dimension::Points(340.0);
+        tabs.style.flex_grow = 1.0;
+        let tabs_id = tree.add_widget(&mut engine, Box::new(tabs), Some(content));
+
+        // Page 1: SplitView
+        let page1 = Container::new(FlexStyle {
+            direction: FlexDirection::Column,
+            width: Dimension::Percent(100.0),
+            height: Dimension::Percent(100.0),
+            flex_grow: 1.0,
+            ..Default::default()
+        });
+        let page1_id = tree.add_widget(&mut engine, Box::new(page1), Some(tabs_id));
+
+        let split_view = SplitView::new(SplitOrientation::Horizontal)
+            .with_split_offset(400.0)
+            .with_min_sizes(200.0, 200.0)
+            .with_divider_thickness(6.0);
+        let split_id = tree.add_widget(&mut engine, Box::new(split_view), Some(page1_id));
+
+        let left_col = Container::new(FlexStyle {
+            direction: FlexDirection::Column,
+            gap: 8.0,
+            height: Dimension::Percent(100.0),
+            ..Default::default()
+        });
+        let left_col_id = tree.add_widget(&mut engine, Box::new(left_col), Some(split_id));
+
+        let right_col = Container::new(FlexStyle {
+            direction: FlexDirection::Column,
+            gap: 8.0,
+            height: Dimension::Percent(100.0),
+            flex_grow: 1.0,
+            ..Default::default()
+        });
+        let right_col_id = tree.add_widget(&mut engine, Box::new(right_col), Some(split_id));
+
+        // Page 2: Controls
+        let page2 = Container::new(FlexStyle {
+            direction: FlexDirection::Row,
+            width: Dimension::Percent(100.0),
+            height: Dimension::Percent(100.0),
+            flex_grow: 1.0,
+            ..Default::default()
+        });
+        let page2_id = tree.add_widget(&mut engine, Box::new(page2), Some(tabs_id));
+
+        tree.get_widget_mut::<Tabs>(tabs_id)
+            .unwrap()
+            .add_tab("Panes", page1_id)
+            .add_tab("Controls", page2_id);
+
+        tree.sync_layout(&mut engine, &shaper);
+        let root_layout = tree.nodes[root.0].as_ref().unwrap().layout_node;
+        engine.compute(root_layout, 1080.0, 760.0);
+
+        let title_r = engine.get_rect(tree.nodes[titlebar_id.0].as_ref().unwrap().layout_node);
+        let left_r = engine.get_rect(tree.nodes[left_col_id.0].as_ref().unwrap().layout_node);
+        let right_r = engine.get_rect(tree.nodes[right_col_id.0].as_ref().unwrap().layout_node);
+
+        assert_eq!(title_r.y, 0.0);
+        assert_eq!(title_r.height, 38.0);
+
+        // Neither pane may be at (0, 0)!
+        assert!(left_r.y > 36.0, "left_r.y was overlapping titlebar: {:?}", left_r);
+        assert!(right_r.y > 36.0, "right_r.y was overlapping titlebar: {:?}", right_r);
+        assert_eq!(left_r.width, 400.0);
+        assert!(right_r.width > 500.0);
+        assert!(left_r.height > 200.0);
+        assert!(right_r.height > 200.0);
     }
 }

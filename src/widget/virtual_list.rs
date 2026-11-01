@@ -512,7 +512,10 @@ impl Widget for VirtualList {
         }
 
         if let KeyEvent::KeyDown {
-            key, modifiers, ..
+            key,
+            modifiers,
+            is_repeat,
+            ..
         } = event
         {
             let curr = self.focused_index.unwrap_or(0);
@@ -556,10 +559,12 @@ impl Widget for VirtualList {
                     }
                     return EventResponse::Handled;
                 }
-                "Return" | "Enter" | "\u{ff0d}" => {
-                    if let Some(focus) = self.focused_index {
-                        self.notify_activate(focus);
-                        return EventResponse::Handled;
+                "Return" | "Enter" | "KP_Enter" | "\u{ff0d}" => {
+                    if !*is_repeat {
+                        if let Some(focus) = self.focused_index {
+                            self.notify_activate(focus);
+                            return EventResponse::Handled;
+                        }
                     }
                 }
                 _ => {}
@@ -851,6 +856,7 @@ mod tests {
             keysym: 0xff53,
             text: None,
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert!(list.selected_indices.contains(&6));
         assert_eq!(list.focused_index, Some(6));
@@ -861,6 +867,7 @@ mod tests {
             keysym: 0xff51,
             text: None,
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert!(list.selected_indices.contains(&5));
 
@@ -870,6 +877,7 @@ mod tests {
             keysym: 0xff50,
             text: None,
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert!(list.selected_indices.contains(&0));
 
@@ -879,7 +887,39 @@ mod tests {
             keysym: 0xff57,
             text: None,
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert!(list.selected_indices.contains(&99));
+
+        let activations = std::rc::Rc::new(std::cell::Cell::new(0usize));
+        let act_clone = activations.clone();
+        let mut list = list.on_activate(move |_| act_clone.set(act_clone.get() + 1));
+
+        list.on_key_event(&KeyEvent::KeyDown {
+            key: "Up".to_string(),
+            keysym: 0xff51,
+            text: None,
+            modifiers: Modifiers::default(),
+            is_repeat: true,
+        });
+        assert_eq!(list.focused_index, Some(98));
+
+        list.on_key_event(&KeyEvent::KeyDown {
+            key: "Return".to_string(),
+            keysym: 0xff0d,
+            text: None,
+            modifiers: Modifiers::default(),
+            is_repeat: true,
+        });
+        assert_eq!(activations.get(), 0);
+
+        list.on_key_event(&KeyEvent::KeyDown {
+            key: "Return".to_string(),
+            keysym: 0xff0d,
+            text: None,
+            modifiers: Modifiers::default(),
+            is_repeat: false,
+        });
+        assert_eq!(activations.get(), 1);
     }
 }

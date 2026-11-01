@@ -225,7 +225,20 @@ impl Application {
             )
             .context("Failed to register Wayland connection FD into Calloop")?;
 
+        let mut repeat_token: Option<(u64, calloop::RegistrationToken)> = None;
+        let mut last_ime_focus: Option<WidgetId> = None;
         let mut last_frame = Instant::now();
+
+        tree.sync_layout(&mut self.layout_engine, &self.shaper);
+        if let Some(root) = tree.root() {
+            let root_layout = tree.nodes[root.0].as_ref().unwrap().layout_node;
+            self.layout_engine.compute(
+                root_layout,
+                self.window.state.width as f32,
+                self.window.state.height as f32,
+            );
+        }
+        tree.dirty = true;
 
         info!("Entering north-toolkit main loop");
 
@@ -264,6 +277,10 @@ impl Application {
                 self.window.connection.flush()?;
             }
 
+            if let Some(repeat_evt) = self.window.state.key_repeat.tick(Instant::now()) {
+                self.window.state.key_events.push(repeat_evt);
+            }
+
             let mut i = 0;
             while i < self.window.state.pending_paste_pipes.len() {
                 let pipe = &mut self.window.state.pending_paste_pipes[i];
@@ -281,7 +298,8 @@ impl Application {
                     i += 1;
                 } else if ret == 0 {
                     let finished = self.window.state.pending_paste_pipes.remove(i);
-                    let is_primary = finished.target == crate::platform::clipboard::SelectionTarget::Primary;
+                    let is_primary =
+                        finished.target == crate::platform::clipboard::SelectionTarget::Primary;
                     let text = String::from_utf8_lossy(&finished.buffer).to_string();
                     self.window.state.paste_events.push((text, is_primary));
                 } else {
@@ -321,6 +339,19 @@ impl Application {
                 }
             }
 
+            let mut ime_events = Vec::new();
+            std::mem::swap(&mut ime_events, &mut self.window.state.ime_events);
+            for evt in &ime_events {
+                if self.active_popup.is_some() {
+                    continue;
+                }
+                let resp = tree.dispatch_ime_event(&self.event_dispatcher, evt);
+                if resp == crate::event::EventResponse::Handled {
+                    tree.dirty = true;
+                }
+            }
+
+            let focus_before_pointer = self.event_dispatcher.focus;
             let mut pointer_events = Vec::new();
             std::mem::swap(&mut pointer_events, &mut self.window.state.pointer_events);
             for evt in &pointer_events {
@@ -363,16 +394,22 @@ impl Application {
                     tree.dirty = true;
                 }
             }
+            if self.event_dispatcher.focus != focus_before_pointer {
+                self.window.state.key_repeat.stop();
+            }
 
             if !pointer_events.is_empty() {
-                let cursor_icon = if self.active_popup.is_some() && self.window.is_pointer_on_popup() {
-                    crate::event::CursorIcon::Pointer
-                } else {
-                    tree.query_cursor_icon(&self.layout_engine, &self.event_dispatcher)
-                };
+                let cursor_icon =
+                    if self.active_popup.is_some() && self.window.is_pointer_on_popup() {
+                        crate::event::CursorIcon::Pointer
+                    } else {
+                        tree.query_cursor_icon(&self.layout_engine, &self.event_dispatcher)
+                    };
                 self.window.set_cursor_shape(cursor_icon);
             }
 
+            let modal_was_active = tree.is_modal_active();
+            let focus_before_key = self.event_dispatcher.focus;
             let mut key_events = Vec::new();
             std::mem::swap(&mut key_events, &mut self.window.state.key_events);
             for evt in &key_events {
@@ -398,6 +435,79 @@ impl Application {
                 if resp == crate::event::EventResponse::Handled {
                     tree.dirty = true;
                 }
+            }
+            tree.check_pending_modal();
+            if self.event_dispatcher.focus.is_none()
+                || self.event_dispatcher.focus != focus_before_key
+                || (!modal_was_active && tree.is_modal_active())
+            {
+                self.window.state.key_repeat.stop();
+            }
+
+            let kr_gen = self.window.state.key_repeat.generation();
+            match self.window.state.key_repeat.next_deadline() {
+                Some(deadline) => {
+                    let needs_rearm = repeat_token.map(|(g, _)| g != kr_gen).unwrap_or(true);
+                    if needs_rearm {
+                        if let Some((_, old_token)) = repeat_token.take() {
+                            loop_handle.remove(old_token);
+                        }
+                        let token = loop_handle
+                            .insert_source(
+                                calloop::timer::Timer::from_deadline(deadline),
+                                |fired_at, _metadata, state| match state.key_repeat.repeat_interval()
+                                {
+                                    Some(interval) if state.key_repeat.is_active() => {
+                                        let now = Instant::now();
+                                        let candidate = fired_at + interval;
+                                        let next = if candidate > now {
+                                            candidate
+                                        } else {
+                                            now + interval
+                                        };
+                                        calloop::timer::TimeoutAction::ToInstant(next)
+                                    }
+                                    _ => calloop::timer::TimeoutAction::Drop,
+                                },
+                            )
+                            .map_err(|e| e.error)
+                            .context("Failed to register key-repeat timer into Calloop")?;
+                        repeat_token = Some((kr_gen, token));
+                    }
+                }
+                None => {
+                    if let Some((_, old_token)) = repeat_token.take() {
+                        loop_handle.remove(old_token);
+                    }
+                }
+            }
+
+            let mut ime_sent = false;
+            let current_focus = self.event_dispatcher.focus;
+            if current_focus != last_ime_focus {
+                if last_ime_focus.is_some() && current_focus.is_some() && self.window.reset_ime() {
+                    ime_sent = true;
+                }
+                last_ime_focus = current_focus;
+            }
+            let ime_rect = if self.active_popup.is_some() {
+                None
+            } else {
+                tree.ime_cursor_rect(&self.layout_engine, &self.event_dispatcher)
+            };
+            if ime_rect.is_none() {
+                tree.clear_focused_ime_preedit(&self.event_dispatcher);
+            } else if self.window.state.ime_state.has_active_preedit()
+                && !tree.focused_has_ime_preedit(&self.event_dispatcher)
+                && self.window.reset_ime()
+            {
+                ime_sent = true;
+            }
+            if self.window.sync_ime(ime_rect) {
+                ime_sent = true;
+            }
+            if ime_sent {
+                self.window.connection.flush()?;
             }
 
             for action in tree.take_clipboard_actions() {
@@ -504,6 +614,11 @@ impl Application {
                                             height: h_u32,
                                             image_available,
                                         });
+                                        self.window.state.key_repeat.stop();
+                                        tree.clear_focused_ime_preedit(&self.event_dispatcher);
+                                        if self.window.sync_ime(None) {
+                                            self.window.connection.flush()?;
+                                        }
                                         tree.dirty = true;
                                         self.window.request_frame();
                                     }
@@ -584,6 +699,15 @@ impl Application {
                     &mut self.vector_atlas,
                     self.window.state.scale,
                 );
+
+                let post_paint_ime_rect = if self.active_popup.is_some() {
+                    None
+                } else {
+                    tree.ime_cursor_rect(&self.layout_engine, &self.event_dispatcher)
+                };
+                if self.window.sync_ime(post_paint_ime_rect) {
+                    self.window.connection.flush()?;
+                }
 
                 let (popup_target, popup_idx) = if let Some(popup) = &self.active_popup {
                     match popup.swapchain.acquire_next_image(popup.image_available) {

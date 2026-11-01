@@ -27,26 +27,27 @@ North Toolkit is a high-performance, retained-mode GUI toolkit for Linux Wayland
                         v                         v                         v
         +-------------------------------+ +-----------------+ +-------------------------------+
         |            layout/            | |     theme/      | |             text/             |
-        | - flex.rs (Flexbox engine)    | | - tokens.rs     | | - shaper.rs (ttf-parser)      |
-        | - LayoutEngine & Rects        | | - theme.rs      | | - rasterizer.rs (ab_glyph)    |
-        +-------------------------------+ +-----------------+ | - font_db.rs (Font fallback)  |
+        | - flex.rs (Flexbox engine)    | | - tokens.rs     | | - shaper.rs (rustybuzz)       |
+        | - LayoutEngine & Rects        | | - theme.rs      | | - rasterizer.rs (swash)       |
+        +-------------------------------+ +-----------------+ | - font_db.rs (fontdb fallback)|
                                                               +-------------------------------+
 ```
 
 ### Module Breakdown
-- `src/app.rs`: Central application orchestrator (`Application`). Integrates the Wayland surface, Vulkan swapchain, frame renderer, glyph cache, layout engine, event dispatcher, and runs the Calloop event loop.
+- `src/app.rs`: Central application orchestrator (`Application`). Integrates the Wayland surface, Vulkan swapchain, frame renderer, glyph cache, layout engine, event dispatcher, key-repeat timer, and runs the Calloop event loop.
 - `src/platform/`:
-  - `wayland.rs`: Native Wayland client integration using `wayland-client` and `wayland-protocols`. Handles `xdg_wm_base`, `wl_surface`, `wp_viewport`, `wp_fractional_scale_manager_v1`, input events (`wl_seat`), and presentation timing via `wl_surface::frame`.
+  - `wayland.rs`: Native Wayland client integration using `wayland-client` and `wayland-protocols`. Handles `xdg_wm_base`, `wl_surface`, `wp_viewport`, `wp_fractional_scale_manager_v1`, input events (`wl_seat`, `wl_keyboard::repeat_info`), IME (`zwp_text_input_v3`), and presentation timing via `wl_surface::frame`.
 - `src/widget/`: Retained widget tree and state management.
   - `tree.rs`: Flat widget arena (`WidgetTree`) mapping generational `WidgetId`s to boxed `Widget` nodes.
   - `state.rs`: Reactive `Property<T>` structures with fine-grained dirty bit tracking for relayout and repaint.
-  - `button.rs`, `label.rs`, `text_input.rs`, `container.rs`, `scroll_area.rs`, `image.rs`: Core concrete widget implementations.
+  - `button.rs`, `checkbox.rs`, `container.rs`, `dialog.rs`, `icon.rs`, `image.rs`, `label.rs`, `popup.rs`, `progress.rs`, `radio.rs`, `scroll_area.rs`, `slider.rs`, `split_view.rs`, `svg.rs`, `switch.rs`, `table_view.rs`, `tabs.rs`, `text_area.rs`, `text_input.rs`, `titlebar.rs`, `toast.rs`, `tooltip.rs`, `virtual_list.rs`: Core concrete widget implementations.
 - `src/layout/`:
   - `flex.rs`: Custom Flexbox layout engine (`LayoutEngine`). Resolves `FlexDirection`, `JustifyContent`, `AlignItems`, `AlignSelf`, `Dimension` (Points, Percent, Auto), `EdgeInsets`, and dynamic intrinsic text measurements.
 - `src/text/`:
-  - `shaper.rs`: Fast OpenType text shaping using `ttf-parser` to extract glyph IDs, horizontal advances, and baseline offsets.
-  - `rasterizer.rs`: Glyph alpha/SDF rasterization via `ab_glyph`.
-  - `font_db.rs`: System and bundled font database providing font family matching and fallback chains.
+  - `shaper.rs`: Fast OpenType text shaping using `rustybuzz` to extract glyph IDs, horizontal advances, character clusters, and baseline offsets.
+  - `rasterizer.rs`: Subpixel and alpha glyph rasterization via `swash`.
+  - `font_db.rs`: System and bundled font database (`fontdb`) providing font family matching and fallback chains.
+  - `editing.rs`: Shared character-indexed `EditBuffer` for cursor, selection, word-boundary navigation, and IME surrounding-text deletion.
 - `src/render/`:
   - `primitives.rs`: Low-level visual primitives (`RenderPrimitive::Quad`, `RenderPrimitive::Glyph`, `Border`, `Color`).
   - `atlas.rs`: Dynamic 2D bin-packing texture atlas for glyph caching.
@@ -57,7 +58,7 @@ North Toolkit is a high-performance, retained-mode GUI toolkit for Linux Wayland
     - `frame.rs`: Double/triple-buffered frame synchronization (`FrameRenderer`) using Vulkan command pools, semaphores, and fences.
     - `texture.rs`: Vulkan image allocation, memory binding, and pixel data uploads.
 - `src/event/`:
-  - `dispatcher.rs`: Dispatches mouse and keyboard events (`PointerEvent`, `KeyEvent`), performs hit-testing against calculated `LayoutRect`s, tracks focused/hovered widgets, and manages event bubbling.
+  - `dispatcher.rs`: Dispatches mouse, keyboard, and IME events (`PointerEvent`, `KeyEvent`, `ImeEvent`), tracks `KeyRepeat` scheduling, performs hit-testing against calculated `LayoutRect`s, tracks focused/hovered widgets, and manages event bubbling.
 - `src/animation/`:
   - `tween.rs`: Easing curves (Linear, EaseIn, EaseOut, EaseInOut, Elastic, Bounce) and tween state progression.
 - `src/theme/`:
@@ -68,7 +69,7 @@ North Toolkit is a high-performance, retained-mode GUI toolkit for Linux Wayland
 ## 2. Concurrency & Event Loop Invariants
 
 - **Non-Blocking UI Reactor**: The Calloop event loop thread processes Wayland server messages, user input, and timer ticks. **Never** block this thread with synchronous disk I/O, heavy file parsing, or CPU-intensive image decoding.
-- **Wayland Source Integration**: Wayland messages are drained via `calloop-wayland-source`. Window configuration, scaling, and input events update local state synchronously during loop dispatch.
+- **Wayland Source Integration**: Wayland messages are drained via `calloop::generic::Generic` on the Wayland connection file descriptor alongside `calloop::timer::Timer` sources. Window configuration, scaling, IME, and input events update local state synchronously during loop dispatch.
 - **Frame Callback Throttling**: Renders are synchronized to the compositor's refresh rate using `wl_surface::frame` callbacks. Never submit frames in an unconstrained loop; only request a new frame callback when the widget tree is dirty.
 - **Dirty Tree Propagation**: Mutations to reactive properties (`Property<T>`) mark widgets with `DirtyFlags::LAYOUT` or `DirtyFlags::PAINT`. If no dirty flags are set, skip the layout and render passes entirely to conserve CPU/GPU cycles.
 

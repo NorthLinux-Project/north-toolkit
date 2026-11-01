@@ -3,4 +3,5 @@
 pub mod clipboard;
 pub mod wayland;
 
-pub use wayland::{ResizeEdge, WaylandState, WaylandWindow, WindowDecorations};
+pub use wayland::{ImeState, ImeSyncAction, ResizeEdge, WaylandState, WaylandWindow, WindowDecorations};
+

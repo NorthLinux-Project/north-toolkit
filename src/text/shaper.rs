@@ -46,6 +46,77 @@ pub struct ShapedText {
     pub line_gap: f32,
 }
 
+impl ShapedText {
+    /// Computes logical horizontal cursor positions for each character boundary `0..=char_count`.
+    pub fn char_x_positions(&self, char_count: usize) -> Vec<f32> {
+        let mut positions = vec![0.0f32; char_count + 1];
+        if char_count == 0 || self.glyphs.is_empty() {
+            return positions;
+        }
+
+        let monotonic = self.glyphs.windows(2).all(|w| w[0].cluster <= w[1].cluster);
+        let groups: Vec<(usize, f32, f32)> = if monotonic {
+            let mut list: Vec<(usize, f32, f32)> = Vec::new();
+            let mut pen_x = 0.0f32;
+            for g in &self.glyphs {
+                let cluster = (g.cluster as usize).min(char_count.saturating_sub(1));
+                let next_pen = pen_x + g.x_advance;
+                if let Some(last) = list.last_mut() {
+                    if last.0 == cluster {
+                        last.2 = next_pen;
+                        pen_x = next_pen;
+                        continue;
+                    }
+                }
+                list.push((cluster, pen_x, next_pen));
+                pen_x = next_pen;
+            }
+            list
+        } else {
+            let mut spans = std::collections::BTreeMap::<usize, (f32, f32)>::new();
+            let mut pen_x = 0.0f32;
+            for g in &self.glyphs {
+                let cluster = (g.cluster as usize).min(char_count.saturating_sub(1));
+                let next_pen = pen_x + g.x_advance;
+                spans
+                    .entry(cluster)
+                    .and_modify(|(s, e)| {
+                        *s = s.min(pen_x);
+                        *e = e.max(next_pen);
+                    })
+                    .or_insert((pen_x, next_pen));
+                pen_x = next_pen;
+            }
+            spans.into_iter().map(|(c, (s, e))| (c, s, e)).collect()
+        };
+
+        for (idx, &(c_start, x_start, x_end)) in groups.iter().enumerate() {
+            let c_end = groups
+                .get(idx + 1)
+                .map(|&(next_c, _, _)| next_c)
+                .unwrap_or(char_count)
+                .max(c_start + 1)
+                .min(char_count);
+            let span = c_end - c_start;
+            for offset in 0..span {
+                let frac = offset as f32 / span as f32;
+                positions[c_start + offset] = x_start + (x_end - x_start) * frac;
+            }
+        }
+        positions[char_count] = self.width;
+        positions
+    }
+
+    /// Returns the logical horizontal offset for `char_idx` within a string of `char_count` characters.
+    pub fn x_for_char(&self, char_idx: usize, char_count: usize) -> f32 {
+        let positions = self.char_x_positions(char_count);
+        positions
+            .get(char_idx.min(char_count))
+            .copied()
+            .unwrap_or(self.width)
+    }
+}
+
 /// LRU-cached text shaping engine using `rustybuzz`.
 #[derive(Clone)]
 pub struct TextShaper {
@@ -142,7 +213,9 @@ impl TextShaper {
                     }
 
                     let mut buffer = rustybuzz::UnicodeBuffer::new();
-                    buffer.push_str(&run_text);
+                    for (char_idx, ch) in run_text.chars().enumerate() {
+                        buffer.add(ch, char_idx as u32);
+                    }
                     let output = rustybuzz::shape(&face, &[], buffer);
 
                     let infos = output.glyph_infos();
@@ -228,5 +301,30 @@ mod tests {
         let v = shaper.shape("V", 24.0);
         let av = shaper.shape("AV", 24.0);
         assert!(av.width <= a.width + v.width + 0.001);
+    }
+
+    #[test]
+    fn test_shaper_multibyte_clusters_and_char_positions() {
+        let shaper = TextShaper::default_system_font().expect("Failed font load");
+        let sample = "é語a";
+        let shaped = shaper.shape(sample, 16.0);
+        assert_eq!(shaped.glyphs.len(), 3);
+        assert_eq!(shaped.glyphs[0].cluster, 0);
+        assert_eq!(shaped.glyphs[1].cluster, 1);
+        assert_eq!(shaped.glyphs[2].cluster, 2);
+
+        let positions = shaped.char_x_positions(3);
+        assert_eq!(positions.len(), 4);
+        assert_eq!(positions[0], 0.0);
+        assert!(positions[1] > positions[0]);
+        assert!(positions[2] > positions[1]);
+        assert!((positions[3] - shaped.width).abs() < 0.001);
+
+        let lig = shaper.shape("fine", 16.0);
+        let lig_pos = lig.char_x_positions(4);
+        assert_eq!(lig_pos.len(), 5);
+        assert!(lig_pos[1] > lig_pos[0]);
+        assert!(lig_pos[2] > lig_pos[1]);
+        assert!((lig_pos[4] - lig.width).abs() < 0.001);
     }
 }

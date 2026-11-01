@@ -2,4 +2,7 @@
 
 pub mod dispatcher;
 
-pub use dispatcher::{CursorIcon, EventDispatcher, EventResponse, KeyEvent, Modifiers, MouseButton, PointerEvent, WidgetId};
+pub use dispatcher::{
+    CursorIcon, EventDispatcher, EventResponse, ImeEvent, KeyEvent, KeyRepeat, Modifiers,
+    MouseButton, PointerEvent, WidgetId,
+};

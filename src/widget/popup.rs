@@ -273,18 +273,26 @@ impl Widget for PopupMenu {
     }
 
     fn on_key_event(&mut self, event: &KeyEvent) -> EventResponse {
-        if let KeyEvent::KeyDown { key, keysym, .. } = event {
+        if let KeyEvent::KeyDown {
+            key,
+            keysym,
+            is_repeat,
+            ..
+        } = event
+        {
             if key == "Down" || *keysym == 0xff54 {
                 self.select_next();
                 return EventResponse::Handled;
             } else if key == "Up" || *keysym == 0xff52 {
                 self.select_prev();
                 return EventResponse::Handled;
-            } else if key == "Return" || key == "Space" || *keysym == 0xff0d || *keysym == 0x20 {
+            } else if !*is_repeat
+                && (key == "Return" || key == "Space" || *keysym == 0xff0d || *keysym == 0x20)
+            {
                 if self.trigger_hovered() {
                     return EventResponse::Handled;
                 }
-            } else if key == "Escape" || *keysym == 0xff1b {
+            } else if !*is_repeat && (key == "Escape" || *keysym == 0xff1b) {
                 self.is_dismissed = true;
                 return EventResponse::Handled;
             }
@@ -581,8 +589,16 @@ impl<T: Clone + ToString + 'static> Widget for Dropdown<T> {
 
     fn on_key_event(&mut self, event: &KeyEvent) -> EventResponse {
         if self.is_focused {
-            if let KeyEvent::KeyDown { key, keysym, .. } = event {
-                if key == "Return" || key == "Space" || *keysym == 0xff0d || *keysym == 0x20 {
+            if let KeyEvent::KeyDown {
+                key,
+                keysym,
+                is_repeat,
+                ..
+            } = event
+            {
+                if !*is_repeat
+                    && (key == "Return" || key == "Space" || *keysym == 0xff0d || *keysym == 0x20)
+                {
                     self.is_open = true;
                     self.request_popup = true;
                     return EventResponse::Handled;

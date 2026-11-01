@@ -50,12 +50,222 @@ use wayland_protocols::wp::fractional_scale::v1::client::{
     wp_fractional_scale_manager_v1::{self, WpFractionalScaleManagerV1},
     wp_fractional_scale_v1::{self, WpFractionalScaleV1},
 };
+use wayland_protocols::wp::text_input::zv3::client::{
+    zwp_text_input_manager_v3::{self, ZwpTextInputManagerV3},
+    zwp_text_input_v3::{self, ContentHint, ContentPurpose, ZwpTextInputV3},
+};
 use wayland_protocols::wp::viewporter::client::{
     wp_viewport::{self, WpViewport},
     wp_viewporter::{self, WpViewporter},
 };
 
-use crate::event::{KeyEvent, Modifiers, MouseButton, PointerEvent};
+use crate::event::{ImeEvent, KeyEvent, KeyRepeat, Modifiers, MouseButton, PointerEvent};
+use crate::layout::LayoutRect;
+
+/// Synchronization action computed by `ImeState` for `ZwpTextInputV3`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImeSyncAction {
+    /// No Wayland requests required.
+    None,
+    /// Enable IME, configure content type, set cursor rectangle, and commit.
+    EnableAndSetRect((i32, i32, i32, i32)),
+    /// Update cursor rectangle and commit.
+    UpdateRect((i32, i32, i32, i32)),
+    /// Disable IME and commit.
+    Disable,
+}
+
+/// Double-buffered Wayland `zwp_text_input_v3` client state machine.
+#[derive(Debug, Default)]
+pub struct ImeState {
+    /// Whether our Wayland surface currently holds `zwp_text_input_v3` focus (`enter` received).
+    pub surface_entered: bool,
+    /// Whether IME is currently enabled on the compositor.
+    pub enabled: bool,
+    /// Total number of `commit` requests issued on this `ZwpTextInputV3` object.
+    pub commit_serial: u32,
+    /// Whether the most recent `done` event serial matched `commit_serial`.
+    pub last_done_serial_matched: bool,
+    /// Last committed logical cursor rectangle `(x, y, width, height)`.
+    pub last_cursor_rect: Option<(i32, i32, i32, i32)>,
+    last_disable_serial: Option<u32>,
+    pending_preedit: Option<(String, i32, i32)>,
+    pending_commit: Option<String>,
+    pending_delete: Option<(u32, u32)>,
+    has_active_preedit: bool,
+}
+
+impl ImeState {
+    /// Creates a new inactive IME protocol state.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Handles `zwp_text_input_v3::Event::Enter`.
+    pub fn on_enter(&mut self) {
+        self.surface_entered = true;
+        self.enabled = false;
+        self.last_cursor_rect = None;
+        self.last_disable_serial = None;
+        self.pending_preedit = None;
+        self.pending_commit = None;
+        self.pending_delete = None;
+        self.last_done_serial_matched = true;
+    }
+
+    /// Handles `zwp_text_input_v3::Event::Leave`, returning a preedit-clear event if composition was active.
+    pub fn on_leave(&mut self) -> Option<ImeEvent> {
+        self.surface_entered = false;
+        self.enabled = false;
+        self.last_cursor_rect = None;
+        self.last_disable_serial = None;
+        self.pending_preedit = None;
+        self.pending_commit = None;
+        self.pending_delete = None;
+        if self.has_active_preedit {
+            self.has_active_preedit = false;
+            Some(ImeEvent::Preedit {
+                text: String::new(),
+                cursor_begin: 0,
+                cursor_end: 0,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Buffers a `preedit_string` event until `done`.
+    pub fn on_preedit_string(
+        &mut self,
+        text: Option<String>,
+        cursor_begin: i32,
+        cursor_end: i32,
+    ) {
+        self.pending_preedit = text
+            .filter(|t| !t.is_empty())
+            .map(|t| (t, cursor_begin, cursor_end));
+    }
+
+    /// Buffers a `commit_string` event until `done`.
+    pub fn on_commit_string(&mut self, text: Option<String>) {
+        self.pending_commit = text.filter(|t| !t.is_empty());
+    }
+
+    /// Buffers a `delete_surrounding_text` event until `done`.
+    pub fn on_delete_surrounding_text(&mut self, before_length: u32, after_length: u32) {
+        if before_length > 0 || after_length > 0 {
+            self.pending_delete = Some((before_length, after_length));
+        } else {
+            self.pending_delete = None;
+        }
+    }
+
+    /// Applies buffered `preedit_string`, `commit_string`, and `delete_surrounding_text` atomically on `done`.
+    pub fn on_done(&mut self, serial: u32, out_events: &mut Vec<ImeEvent>) {
+        let preedit = self.pending_preedit.take();
+        let commit = self.pending_commit.take();
+        let delete = self.pending_delete.take();
+        self.last_done_serial_matched = serial == self.commit_serial;
+
+        if !self.enabled || !self.surface_entered {
+            return;
+        }
+        if let Some(dis_serial) = self.last_disable_serial {
+            if dis_serial.wrapping_sub(serial) < (1u32 << 31) {
+                return;
+            }
+        }
+
+        if self.has_active_preedit && (delete.is_some() || commit.is_some() || preedit.is_none()) {
+            out_events.push(ImeEvent::Preedit {
+                text: String::new(),
+                cursor_begin: 0,
+                cursor_end: 0,
+            });
+            self.has_active_preedit = false;
+        }
+
+        if let Some((before, after)) = delete {
+            out_events.push(ImeEvent::DeleteSurrounding { before, after });
+        }
+
+        if let Some(committed) = commit {
+            out_events.push(ImeEvent::Commit(committed));
+        }
+
+        if let Some((text, cursor_begin, cursor_end)) = preedit {
+            self.has_active_preedit = true;
+            out_events.push(ImeEvent::Preedit {
+                text,
+                cursor_begin,
+                cursor_end,
+            });
+        }
+    }
+
+    /// Computes any Wayland IME state synchronization request needed for the focused widget's cursor rect.
+    pub fn plan_sync(&mut self, cursor_rect: Option<LayoutRect>) -> ImeSyncAction {
+        if !self.surface_entered {
+            return ImeSyncAction::None;
+        }
+        match cursor_rect {
+            Some(rect) => {
+                let r = (
+                    rect.x.round() as i32,
+                    rect.y.round() as i32,
+                    (rect.width.round() as i32).max(1),
+                    (rect.height.round() as i32).max(1),
+                );
+                if !self.enabled {
+                    self.enabled = true;
+                    self.last_cursor_rect = Some(r);
+                    self.commit_serial = self.commit_serial.wrapping_add(1);
+                    ImeSyncAction::EnableAndSetRect(r)
+                } else if self.last_cursor_rect != Some(r) {
+                    self.last_cursor_rect = Some(r);
+                    self.commit_serial = self.commit_serial.wrapping_add(1);
+                    ImeSyncAction::UpdateRect(r)
+                } else {
+                    ImeSyncAction::None
+                }
+            }
+            None => {
+                if self.enabled {
+                    self.enabled = false;
+                    self.last_cursor_rect = None;
+                    self.has_active_preedit = false;
+                    self.commit_serial = self.commit_serial.wrapping_add(1);
+                    self.last_disable_serial = Some(self.commit_serial);
+                    ImeSyncAction::Disable
+                } else {
+                    ImeSyncAction::None
+                }
+            }
+        }
+    }
+
+    /// Returns `true` if the compositor currently has an uncommitted non-empty preedit session.
+    pub fn has_active_preedit(&self) -> bool {
+        self.has_active_preedit
+    }
+
+    /// Resets active IME composition when focus switches directly between two text widgets on the same surface.
+    pub fn reset(&mut self) -> bool {
+        if self.surface_entered && self.enabled {
+            self.enabled = false;
+            self.last_cursor_rect = None;
+            self.has_active_preedit = false;
+            self.pending_preedit = None;
+            self.pending_commit = None;
+            self.pending_delete = None;
+            self.commit_serial = self.commit_serial.wrapping_add(1);
+            self.last_disable_serial = Some(self.commit_serial);
+            true
+        } else {
+            false
+        }
+    }
+}
 
 /// Auxiliary Wayland popup surface state for context menus and dropdowns.
 pub struct PopupSurface {
@@ -204,6 +414,11 @@ pub struct WaylandState {
     pub is_maximized: bool,
     pub is_active: bool,
     pub decoration_mode: WindowDecorations,
+    pub key_repeat: KeyRepeat,
+    pub text_input_manager: Option<ZwpTextInputManagerV3>,
+    pub text_input: Option<ZwpTextInputV3>,
+    pub ime_state: ImeState,
+    pub ime_events: Vec<ImeEvent>,
 }
 
 impl WaylandState {
@@ -265,6 +480,11 @@ impl WaylandState {
             cursor_shape_device: None,
             current_cursor_shape: crate::event::CursorIcon::Default,
             pointer_enter_serial: 0,
+            key_repeat: KeyRepeat::new(),
+            text_input_manager: None,
+            text_input: None,
+            ime_state: ImeState::new(),
+            ime_events: Vec::new(),
         }
     }
 }
@@ -602,6 +822,47 @@ impl WaylandWindow {
             }
         }
     }
+
+    /// Synchronizes `zwp_text_input_v3` enablement, content type, and logical cursor rectangle.
+    pub fn sync_ime(&mut self, cursor_rect: Option<LayoutRect>) -> bool {
+        let Some(ti) = &self.state.text_input else {
+            return false;
+        };
+        match self.state.ime_state.plan_sync(cursor_rect) {
+            ImeSyncAction::None => false,
+            ImeSyncAction::EnableAndSetRect((x, y, w, h)) => {
+                ti.enable();
+                ti.set_content_type(ContentHint::None, ContentPurpose::Normal);
+                ti.set_cursor_rectangle(x, y, w, h);
+                ti.commit();
+                true
+            }
+            ImeSyncAction::UpdateRect((x, y, w, h)) => {
+                ti.set_cursor_rectangle(x, y, w, h);
+                ti.commit();
+                true
+            }
+            ImeSyncAction::Disable => {
+                ti.disable();
+                ti.commit();
+                true
+            }
+        }
+    }
+
+    /// Resets `zwp_text_input_v3` state on the compositor when keyboard focus switches between text widgets.
+    pub fn reset_ime(&mut self) -> bool {
+        let Some(ti) = &self.state.text_input else {
+            return false;
+        };
+        if self.state.ime_state.reset() {
+            ti.disable();
+            ti.commit();
+            true
+        } else {
+            false
+        }
+    }
 }
 
 impl Dispatch<XdgPositioner, ()> for WaylandState {
@@ -679,6 +940,9 @@ impl Dispatch<WlRegistry, ()> for WaylandState {
                     if let Some(mgr) = &state.primary_selection_device_manager {
                         state.primary_selection_device = Some(mgr.get_device(&seat, qh, ()));
                     }
+                    if let Some(mgr) = &state.text_input_manager {
+                        state.text_input = Some(mgr.get_text_input(&seat, qh, ()));
+                    }
                     state.seat = Some(seat);
                 }
                 "wl_data_device_manager" => {
@@ -694,6 +958,13 @@ impl Dispatch<WlRegistry, ()> for WaylandState {
                         state.primary_selection_device = Some(mgr.get_device(seat, qh, ()));
                     }
                     state.primary_selection_device_manager = Some(mgr);
+                }
+                "zwp_text_input_manager_v3" => {
+                    let mgr = registry.bind::<ZwpTextInputManagerV3, _, _>(name, 1, qh, ());
+                    if let Some(seat) = &state.seat {
+                        state.text_input = Some(mgr.get_text_input(seat, qh, ()));
+                    }
+                    state.text_input_manager = Some(mgr);
                 }
                 "zxdg_decoration_manager_v1" => {
                     state.decoration_manager = Some(registry.bind::<ZxdgDecorationManagerV1, _, _>(name, 1, qh, ()));
@@ -781,6 +1052,9 @@ impl Dispatch<XdgToplevel, ()> for WaylandState {
                 }
                 state.is_maximized = is_maximized;
                 state.is_active = is_active;
+                if !is_active {
+                    state.key_repeat.stop();
+                }
 
                 if width > 0 && height > 0 {
                     let (w, h) = (width as u32, height as u32);
@@ -923,6 +1197,7 @@ impl Dispatch<WlKeyboard, ()> for WaylandState {
     ) {
         match event {
             wl_keyboard::Event::Keymap { format, fd, size } => {
+                state.key_repeat.stop();
                 if format == wayland_client::WEnum::Value(wl_keyboard::KeymapFormat::XkbV1) {
                     use std::fs::File;
                     use std::io::Read;
@@ -947,6 +1222,17 @@ impl Dispatch<WlKeyboard, ()> for WaylandState {
                     }
                 }
             }
+            wl_keyboard::Event::Enter { serial, .. } => {
+                state.last_seat_serial = serial;
+                state.key_repeat.stop();
+            }
+            wl_keyboard::Event::Leave { serial, .. } => {
+                state.last_seat_serial = serial;
+                state.key_repeat.stop();
+            }
+            wl_keyboard::Event::RepeatInfo { rate, delay } => {
+                state.key_repeat.set_repeat_info(rate, delay);
+            }
             wl_keyboard::Event::Modifiers {
                 mods_depressed,
                 mods_latched,
@@ -963,6 +1249,47 @@ impl Dispatch<WlKeyboard, ()> for WaylandState {
                         0,
                         group,
                     );
+                    if let Some(active_key) = state.key_repeat.active_keycode() {
+                        let xkb_keycode = xkbcommon::xkb::Keycode::new(active_key + 8);
+                        let sym = xkb_state.key_get_one_sym(xkb_keycode);
+                        let name = xkbcommon::xkb::keysym_get_name(sym);
+                        let utf8 = xkb_state.key_get_utf8(xkb_keycode);
+                        let text = if !utf8.is_empty() {
+                            let first = utf8.chars().next().unwrap();
+                            if first >= ' ' || first == '\t' || first == '\n' {
+                                Some(utf8)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        };
+                        let modifiers = Modifiers {
+                            shift: xkb_state.mod_name_is_active(
+                                xkbcommon::xkb::MOD_NAME_SHIFT,
+                                xkbcommon::xkb::STATE_MODS_EFFECTIVE,
+                            ),
+                            ctrl: xkb_state.mod_name_is_active(
+                                xkbcommon::xkb::MOD_NAME_CTRL,
+                                xkbcommon::xkb::STATE_MODS_EFFECTIVE,
+                            ),
+                            alt: xkb_state.mod_name_is_active(
+                                xkbcommon::xkb::MOD_NAME_ALT,
+                                xkbcommon::xkb::STATE_MODS_EFFECTIVE,
+                            ),
+                            logo: xkb_state.mod_name_is_active(
+                                xkbcommon::xkb::MOD_NAME_LOGO,
+                                xkbcommon::xkb::STATE_MODS_EFFECTIVE,
+                            ),
+                        };
+                        state.key_repeat.update_active_event(KeyEvent::KeyDown {
+                            key: name,
+                            keysym: sym.raw(),
+                            text,
+                            modifiers,
+                            is_repeat: true,
+                        });
+                    }
                 }
             }
             wl_keyboard::Event::Key {
@@ -1014,13 +1341,27 @@ impl Dispatch<WlKeyboard, ()> for WaylandState {
                 };
 
                 if is_pressed {
-                    state.key_events.push(KeyEvent::KeyDown {
+                    let evt = KeyEvent::KeyDown {
                         key: key_str,
                         keysym,
                         text: text_char,
                         modifiers,
-                    });
+                        is_repeat: false,
+                    };
+                    let key_repeats = state
+                        .xkb_keymap
+                        .as_ref()
+                        .map(|km| km.key_repeats(xkb_keycode))
+                        .unwrap_or(false);
+                    state.key_repeat.on_key_press(
+                        key,
+                        evt.clone(),
+                        key_repeats,
+                        std::time::Instant::now(),
+                    );
+                    state.key_events.push(evt);
                 } else {
+                    state.key_repeat.on_key_release(key);
                     state.key_events.push(KeyEvent::KeyUp {
                         key: key_str,
                         keysym,
@@ -1399,8 +1740,85 @@ impl Dispatch<WpCursorShapeDeviceV1, ()> for WaylandState {
     }
 }
 
+impl Dispatch<ZwpTextInputManagerV3, ()> for WaylandState {
+    fn event(
+        _: &mut Self,
+        _: &ZwpTextInputManagerV3,
+        _: zwp_text_input_manager_v3::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+    }
+}
+
+impl Dispatch<ZwpTextInputV3, ()> for WaylandState {
+    fn event(
+        state: &mut Self,
+        _: &ZwpTextInputV3,
+        event: zwp_text_input_v3::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_text_input_v3::Event::Enter { surface } => {
+                if state.surface.as_ref() == Some(&surface) {
+                    tracing::debug!("Wayland zwp_text_input_v3 enter");
+                    state.ime_state.on_enter();
+                }
+            }
+            zwp_text_input_v3::Event::Leave { surface } => {
+                if state.surface.as_ref() == Some(&surface) || state.ime_state.surface_entered {
+                    tracing::debug!("Wayland zwp_text_input_v3 leave");
+                    if let Some(clear_evt) = state.ime_state.on_leave() {
+                        state.ime_events.push(clear_evt);
+                    }
+                }
+            }
+            zwp_text_input_v3::Event::PreeditString {
+                text,
+                cursor_begin,
+                cursor_end,
+            } => {
+                state
+                    .ime_state
+                    .on_preedit_string(text, cursor_begin, cursor_end);
+            }
+            zwp_text_input_v3::Event::CommitString { text } => {
+                state.ime_state.on_commit_string(text);
+            }
+            zwp_text_input_v3::Event::DeleteSurroundingText {
+                before_length,
+                after_length,
+            } => {
+                state
+                    .ime_state
+                    .on_delete_surrounding_text(before_length, after_length);
+            }
+            zwp_text_input_v3::Event::Done { serial } => {
+                let prev_len = state.ime_events.len();
+                state.ime_state.on_done(serial, &mut state.ime_events);
+                if state.ime_events.len() > prev_len {
+                    state.key_repeat.stop();
+                }
+                if !state.ime_state.last_done_serial_matched {
+                    tracing::debug!(
+                        serial,
+                        expected = state.ime_state.commit_serial,
+                        "zwp_text_input_v3 done serial differed from latest commit"
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn test_xkb_keymap_nul_terminator_handling() {
         let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
@@ -1420,4 +1838,154 @@ mod tests {
         );
         assert!(keymap.is_some());
     }
+
+    #[test]
+    fn test_ime_state_preedit_commit_and_cancel_atomicity() {
+        let mut ime = ImeState::new();
+        let mut events = Vec::new();
+
+        assert_eq!(
+            ime.plan_sync(Some(LayoutRect {
+                x: 10.0,
+                y: 20.0,
+                width: 2.0,
+                height: 18.0,
+            })),
+            ImeSyncAction::None
+        );
+
+        ime.on_enter();
+        assert_eq!(
+            ime.plan_sync(Some(LayoutRect {
+                x: 10.4,
+                y: 20.6,
+                width: 0.0,
+                height: 18.0,
+            })),
+            ImeSyncAction::EnableAndSetRect((10, 21, 1, 18))
+        );
+        assert_eq!(ime.commit_serial, 1);
+
+        // Identical rounded rect produces no redundant request.
+        assert_eq!(
+            ime.plan_sync(Some(LayoutRect {
+                x: 10.2,
+                y: 20.8,
+                width: 0.4,
+                height: 18.2,
+            })),
+            ImeSyncAction::None
+        );
+
+        // Preedit composition followed by done.
+        ime.on_preedit_string(Some("にほん".into()), 9, 9);
+        ime.on_done(1, &mut events);
+        assert!(ime.last_done_serial_matched);
+        assert_eq!(
+            events,
+            vec![ImeEvent::Preedit {
+                text: "にほん".into(),
+                cursor_begin: 9,
+                cursor_end: 9,
+            }]
+        );
+        events.clear();
+
+        // Commit without new preedit clears active preedit first, then commits atomically.
+        ime.on_commit_string(Some("日本".into()));
+        ime.on_done(1, &mut events);
+        assert_eq!(
+            events,
+            vec![
+                ImeEvent::Preedit {
+                    text: String::new(),
+                    cursor_begin: 0,
+                    cursor_end: 0,
+                },
+                ImeEvent::Commit("日本".into()),
+            ]
+        );
+        events.clear();
+
+        // Active preedit cancelled by empty done (e.g. Escape in IME).
+        ime.on_preedit_string(Some("ka".into()), 2, 2);
+        ime.on_done(1, &mut events);
+        events.clear();
+        ime.on_done(1, &mut events);
+        assert_eq!(
+            events,
+            vec![ImeEvent::Preedit {
+                text: String::new(),
+                cursor_begin: 0,
+                cursor_end: 0,
+            }]
+        );
+        events.clear();
+
+        // Delete surrounding + commit + new preedit ordering.
+        ime.on_delete_surrounding_text(6, 3);
+        ime.on_commit_string(Some("語".into()));
+        ime.on_preedit_string(Some("g".into()), 1, 1);
+        ime.on_done(0, &mut events);
+        assert!(!ime.last_done_serial_matched);
+        assert_eq!(
+            events,
+            vec![
+                ImeEvent::DeleteSurrounding {
+                    before: 6,
+                    after: 3,
+                },
+                ImeEvent::Commit("語".into()),
+                ImeEvent::Preedit {
+                    text: "g".into(),
+                    cursor_begin: 1,
+                    cursor_end: 1,
+                },
+            ]
+        );
+        events.clear();
+
+        // Surface leave clears active preedit.
+        assert_eq!(
+            ime.on_leave(),
+            Some(ImeEvent::Preedit {
+                text: String::new(),
+                cursor_begin: 0,
+                cursor_end: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn test_ime_state_same_surface_reset_discards_stale_serials() {
+        let mut ime = ImeState::new();
+        let mut events = Vec::new();
+
+        ime.on_enter();
+        assert_eq!(
+            ime.plan_sync(Some(LayoutRect::new(10.0, 20.0, 2.0, 18.0))),
+            ImeSyncAction::EnableAndSetRect((10, 20, 2, 18))
+        );
+        assert_eq!(ime.commit_serial, 1);
+
+        // Same-surface focus switch resets old widget's session (serial 2) and enables new widget (serial 3).
+        assert!(ime.reset());
+        assert_eq!(ime.commit_serial, 2);
+        assert_eq!(
+            ime.plan_sync(Some(LayoutRect::new(200.0, 20.0, 2.0, 18.0))),
+            ImeSyncAction::EnableAndSetRect((200, 20, 2, 18))
+        );
+        assert_eq!(ime.commit_serial, 3);
+
+        // Stale in-flight event from old widget (serial 1 or 2) must be discarded.
+        ime.on_commit_string(Some("stale".into()));
+        ime.on_done(1, &mut events);
+        assert!(events.is_empty());
+
+        // Event for new widget session (serial 3) is applied cleanly.
+        ime.on_commit_string(Some("fresh".into()));
+        ime.on_done(3, &mut events);
+        assert_eq!(events, vec![ImeEvent::Commit("fresh".into())]);
+    }
 }
+

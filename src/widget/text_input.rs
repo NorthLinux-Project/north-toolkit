@@ -8,12 +8,27 @@ use super::icon::IconName;
 use super::state::Property;
 use super::tooltip::Tooltip;
 use super::tree::{ClipboardAction, Widget};
-use crate::event::{EventResponse, KeyEvent, MouseButton, PointerEvent};
+use crate::event::{EventResponse, ImeEvent, KeyEvent, MouseButton, PointerEvent};
 use crate::layout::{AlignItems, Dimension, EdgeInsets, FlexDirection, FlexStyle, LayoutRect, MeasureFunc};
 use crate::render::vector::{StrokeStyle, VectorAtlas, VectorPath, VectorRasterizer};
 use crate::render::{Border, CornerRadii, GlyphAtlas, RenderPrimitive};
-use crate::text::{GlyphRasterizer, TextShaper};
+use crate::text::{EditBuffer, GlyphRasterizer, TextShaper};
 use crate::theme::Theme;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PreeditState {
+    text: String,
+    cursor_begin: i32,
+    cursor_end: i32,
+}
+
+fn byte_to_char_clamped(s: &str, byte_idx: usize) -> usize {
+    let mut b = byte_idx.min(s.len());
+    while b > 0 && !s.is_char_boundary(b) {
+        b -= 1;
+    }
+    s[..b].chars().count()
+}
 
 /// Single-line interactive text input widget.
 pub struct TextInput {
@@ -43,9 +58,12 @@ pub struct TextInput {
     click_count: u8,
     cached_glyph_positions: RefCell<Vec<f32>>,
     cached_text_origin_x: Cell<f32>,
+    cached_cursor_rel_x: Cell<f32>,
+    cached_shaper: RefCell<Option<TextShaper>>,
     /// Horizontal scroll offset for long lines exceeding input width.
     pub scroll_offset_x: Cell<f32>,
     pending_clipboard_action: Option<ClipboardAction>,
+    preedit: Option<PreeditState>,
     /// Optional hover tooltip.
     pub tooltip: Option<Tooltip>,
 }
@@ -77,8 +95,11 @@ impl TextInput {
             click_count: 0,
             cached_glyph_positions: RefCell::new(Vec::new()),
             cached_text_origin_x: Cell::new(0.0),
+            cached_cursor_rel_x: Cell::new(0.0),
+            cached_shaper: RefCell::new(None),
             scroll_offset_x: Cell::new(0.0),
             pending_clipboard_action: None,
+            preedit: None,
             tooltip: None,
         }
     }
@@ -107,88 +128,55 @@ impl TextInput {
         self
     }
 
+    /// Returns the active IME preedit composition string, if any.
+    pub fn preedit_text(&self) -> Option<&str> {
+        self.preedit.as_ref().map(|p| p.text.as_str())
+    }
+
+    fn edit_buffer(&self) -> EditBuffer {
+        let anchor = self.selection.map(|(a, _)| a);
+        let focus = self.selection.map(|(_, f)| f).unwrap_or(self.cursor_pos);
+        EditBuffer::with_state(self.text.get().clone(), focus, anchor)
+    }
+
+    fn apply_edit_buffer(&mut self, buf: EditBuffer) {
+        self.cursor_pos = buf.cursor();
+        self.selection = buf.selection_pair();
+        let updated = buf.into_text();
+        if self.text.get() != &updated {
+            self.text.set(updated);
+        }
+    }
+
+    fn reset_caret_blink(&mut self) {
+        self.cursor_visible = true;
+        self.cursor_timer_ms = 0.0;
+    }
+
     /// Returns the normalized `(start, end)` character bounds of the active selection if non-empty.
     pub fn selection_range(&self) -> Option<(usize, usize)> {
-        if let Some((anchor, focus)) = self.selection {
-            if anchor != focus {
-                return Some((anchor.min(focus), anchor.max(focus)));
-            }
-        }
-        None
+        self.edit_buffer().selection_range()
     }
 
     /// Returns the text slice contained within the active selection.
     pub fn selected_text(&self) -> Option<String> {
-        let (start, end) = self.selection_range()?;
-        let chars: Vec<char> = self.text.get().chars().collect();
-        if start < chars.len() {
-            let end_bounded = end.min(chars.len());
-            Some(chars[start..end_bounded].iter().collect())
-        } else {
-            None
-        }
+        self.edit_buffer().selected_text()
     }
 
     /// Deletes the currently selected text characters from the input buffer.
     pub fn delete_selection(&mut self) -> bool {
-        if let Some((start, end)) = self.selection_range() {
-            let mut chars: Vec<char> = self.text.get().chars().collect();
-            if start < chars.len() {
-                let end_bounded = end.min(chars.len());
-                chars.drain(start..end_bounded);
-                self.text.set(chars.into_iter().collect());
-                self.cursor_pos = start;
-                self.selection = None;
-                self.cursor_visible = true;
-                self.cursor_timer_ms = 0.0;
-                return true;
-            }
+        let mut buf = self.edit_buffer();
+        let deleted = buf.delete_selection();
+        self.apply_edit_buffer(buf);
+        if deleted {
+            self.reset_caret_blink();
         }
-        self.selection = None;
-        false
+        deleted
     }
 
     /// Finds word boundaries `(start, end)` around `char_idx` for double-click word selection.
     pub fn find_word_boundaries(&self, char_idx: usize) -> (usize, usize) {
-        let chars: Vec<char> = self.text.get().chars().collect();
-        if chars.is_empty() {
-            return (0, 0);
-        }
-        let idx = char_idx.min(chars.len().saturating_sub(1));
-        let c = chars[idx];
-        let is_word_char = |ch: char| ch.is_alphanumeric() || ch == '_';
-
-        if is_word_char(c) {
-            let mut start = idx;
-            while start > 0 && is_word_char(chars[start - 1]) {
-                start -= 1;
-            }
-            let mut end = idx;
-            while end < chars.len() && is_word_char(chars[end]) {
-                end += 1;
-            }
-            (start, end)
-        } else if c.is_whitespace() {
-            let mut start = idx;
-            while start > 0 && chars[start - 1].is_whitespace() {
-                start -= 1;
-            }
-            let mut end = idx;
-            while end < chars.len() && chars[end].is_whitespace() {
-                end += 1;
-            }
-            (start, end)
-        } else {
-            let mut start = idx;
-            while start > 0 && !is_word_char(chars[start - 1]) && !chars[start - 1].is_whitespace() {
-                start -= 1;
-            }
-            let mut end = idx;
-            while end < chars.len() && !is_word_char(chars[end]) && !chars[end].is_whitespace() {
-                end += 1;
-            }
-            (start, end)
-        }
+        self.edit_buffer().find_word_boundaries(char_idx)
     }
 
     /// Converts an absolute horizontal coordinate `x` into a character index.
@@ -215,6 +203,77 @@ impl TextInput {
         }
         (positions.len().saturating_sub(1)).min(total_chars)
     }
+
+    fn compose_display_string(&self) -> Option<(String, usize, usize, usize)> {
+        let pre = self.preedit.as_ref()?;
+        if pre.text.is_empty() {
+            return None;
+        }
+        let buf = self.edit_buffer();
+        let pre_start_char = buf.cursor().min(buf.char_len());
+        let pre_byte = buf.char_to_byte(pre_start_char);
+        let pre_char_len = pre.text.chars().count();
+        let pre_end_char = pre_start_char + pre_char_len;
+        let active_char = if pre.cursor_begin >= 0 {
+            pre_start_char + byte_to_char_clamped(&pre.text, pre.cursor_begin as usize)
+        } else {
+            pre_end_char
+        };
+        let committed = buf.text();
+        let mut combined = String::with_capacity(committed.len() + pre.text.len());
+        combined.push_str(&committed[..pre_byte]);
+        combined.push_str(&pre.text);
+        combined.push_str(&committed[pre_byte..]);
+        Some((combined, pre_start_char, pre_end_char, active_char))
+    }
+
+    fn resolve_cursor_rel_x(&self, text_area_w: f32) -> (f32, f32) {
+        if self.cached_shaper.borrow().is_none() {
+            if let Ok(shaper) = TextShaper::default_system_font() {
+                *self.cached_shaper.borrow_mut() = Some(shaper);
+            }
+        }
+        let shaper_ref = self.cached_shaper.borrow();
+        let (cursor_rel_x, total_w) = if let Some((combined, _, _, active_char)) = self.compose_display_string() {
+            let total_chars = combined.chars().count();
+            if let Some(shaper) = shaper_ref.as_ref() {
+                let shaped = shaper.shape(&combined, self.font_size);
+                (shaped.x_for_char(active_char, total_chars), shaped.width)
+            } else {
+                let est = active_char as f32 * self.font_size * 0.55;
+                (est, total_chars as f32 * self.font_size * 0.55)
+            }
+        } else if self.text.get().is_empty() {
+            (0.0, 0.0)
+        } else {
+            let s = self.text.get();
+            let total_chars = s.chars().count();
+            let cur = self.cursor_pos.min(total_chars);
+            if let Some(shaper) = shaper_ref.as_ref() {
+                let shaped = shaper.shape(s, self.font_size);
+                (shaped.x_for_char(cur, total_chars), shaped.width)
+            } else {
+                let est = cur as f32 * self.font_size * 0.55;
+                (est, total_chars as f32 * self.font_size * 0.55)
+            }
+        };
+
+        let mut scroll_x = self.scroll_offset_x.get();
+        if total_w <= text_area_w {
+            scroll_x = 0.0;
+        } else {
+            if cursor_rel_x - scroll_x > text_area_w - 6.0 {
+                scroll_x = cursor_rel_x - (text_area_w - 6.0);
+            } else if cursor_rel_x - scroll_x < 6.0 {
+                scroll_x = (cursor_rel_x - 6.0).max(0.0);
+            }
+            scroll_x = scroll_x.clamp(0.0, (total_w - text_area_w + 12.0).max(0.0));
+        }
+
+        self.cached_cursor_rel_x.set(cursor_rel_x);
+        self.scroll_offset_x.set(scroll_x);
+        (cursor_rel_x, scroll_x)
+    }
 }
 
 impl Widget for TextInput {
@@ -223,6 +282,9 @@ impl Widget for TextInput {
     }
 
     fn measure(&self, shaper: &TextShaper) -> Option<MeasureFunc> {
+        if self.cached_shaper.borrow().is_none() {
+            *self.cached_shaper.borrow_mut() = Some(shaper.clone());
+        }
         let sample = if self.text.get().is_empty() {
             &self.placeholder
         } else {
@@ -235,7 +297,7 @@ impl Widget for TextInput {
     }
 
     fn tick_animation(&mut self, delta_ms: f32) -> bool {
-        if self.is_focused {
+        if self.is_focused && self.preedit.is_none() {
             self.cursor_timer_ms += delta_ms;
             if self.cursor_timer_ms >= 500.0 {
                 self.cursor_timer_ms = 0.0;
@@ -253,6 +315,7 @@ impl Widget for TextInput {
         if !focused {
             self.selection = None;
             self.is_dragging_selection = false;
+            self.preedit = None;
         }
     }
 
@@ -272,19 +335,83 @@ impl Widget for TextInput {
         if !self.is_focused {
             return;
         }
-        self.delete_selection();
-        let mut chars: Vec<char> = self.text.get().chars().collect();
-        let mut pos = self.cursor_pos.min(chars.len());
-        for c in text.chars() {
-            if !c.is_control() || c == '\t' {
-                chars.insert(pos, c);
-                pos += 1;
+        self.preedit = None;
+        let filtered: String = text
+            .chars()
+            .filter(|&c| !c.is_control() || c == '\t')
+            .collect();
+        if !filtered.is_empty() {
+            let mut buf = self.edit_buffer();
+            buf.insert(&filtered);
+            self.apply_edit_buffer(buf);
+        }
+        self.reset_caret_blink();
+    }
+
+    fn on_ime_event(&mut self, event: &ImeEvent) -> EventResponse {
+        if !self.is_focused {
+            return EventResponse::Ignored;
+        }
+        match event {
+            ImeEvent::Preedit {
+                text,
+                cursor_begin,
+                cursor_end,
+            } => {
+                if text.is_empty() {
+                    self.preedit = None;
+                } else {
+                    self.delete_selection();
+                    self.preedit = Some(PreeditState {
+                        text: text.clone(),
+                        cursor_begin: *cursor_begin,
+                        cursor_end: *cursor_end,
+                    });
+                }
+                self.reset_caret_blink();
+                EventResponse::Handled
+            }
+            ImeEvent::Commit(committed) => {
+                self.preedit = None;
+                let filtered: String = committed
+                    .chars()
+                    .filter(|&c| !c.is_control() || c == '\t')
+                    .collect();
+                if !filtered.is_empty() {
+                    let mut buf = self.edit_buffer();
+                    buf.insert(&filtered);
+                    self.apply_edit_buffer(buf);
+                }
+                self.reset_caret_blink();
+                EventResponse::Handled
+            }
+            ImeEvent::DeleteSurrounding { before, after } => {
+                let mut buf = self.edit_buffer();
+                buf.delete_surrounding_bytes(*before as usize, *after as usize);
+                self.apply_edit_buffer(buf);
+                self.reset_caret_blink();
+                EventResponse::Handled
             }
         }
-        self.cursor_pos = pos;
-        self.text.set(chars.into_iter().collect());
-        self.cursor_visible = true;
-        self.cursor_timer_ms = 0.0;
+    }
+
+    fn ime_cursor_rect(&self, rect: LayoutRect) -> Option<LayoutRect> {
+        if !self.is_focused {
+            return None;
+        }
+        let icon_offset = if self.leading_icon.is_some() { 24.0 } else { 0.0 };
+        let text_area_x = rect.x + self.style.padding.left + icon_offset;
+        let text_area_w = (rect.x + rect.width - self.style.padding.right - text_area_x).max(1.0);
+        let (cursor_rel_x, scroll_x) = self.resolve_cursor_rel_x(text_area_w);
+        let cursor_x = (text_area_x + cursor_rel_x - scroll_x)
+            .clamp(text_area_x, text_area_x + text_area_w);
+        let cursor_h = self.font_size * 1.2;
+        let cursor_y = rect.y + rect.height * 0.5 - cursor_h * 0.5;
+        Some(LayoutRect::new(cursor_x, cursor_y, 2.0, cursor_h))
+    }
+
+    fn has_ime_preedit(&self) -> bool {
+        self.preedit.is_some()
     }
 
     fn on_pointer_event(&mut self, event: &PointerEvent, rect: LayoutRect) -> EventResponse {
@@ -293,8 +420,8 @@ impl Widget for TextInput {
                 if rect.contains(x, y) {
                     if button == MouseButton::Left {
                         self.is_focused = true;
-                        self.cursor_visible = true;
-                        self.cursor_timer_ms = 0.0;
+                        self.preedit = None;
+                        self.reset_caret_blink();
 
                         let now = Instant::now();
                         let is_double = if let Some(last) = self.last_click_instant {
@@ -310,36 +437,35 @@ impl Widget for TextInput {
                         }
                         self.last_click_instant = Some(now);
 
-                        let total_chars = self.text.get().chars().count();
+                        let mut buf = self.edit_buffer();
+                        let total_chars = buf.char_len();
                         let char_idx = self.char_index_from_x(x).min(total_chars);
 
                         if self.click_count == 2 {
-                            let (w_start, w_end) = self.find_word_boundaries(char_idx);
-                            self.selection = Some((w_start, w_end));
-                            self.cursor_pos = w_end;
-                            if let Some(sel) = self.selected_text() {
+                            let (w_start, w_end) = buf.find_word_boundaries(char_idx);
+                            buf.set_selection(w_start, w_end);
+                            if let Some(sel) = buf.selected_text() {
                                 self.pending_clipboard_action = Some(ClipboardAction::SetPrimary(sel));
                             }
                         } else if self.click_count == 3 {
-                            self.selection = Some((0, total_chars));
-                            self.cursor_pos = total_chars;
-                            if let Some(sel) = self.selected_text() {
+                            buf.select_all();
+                            if let Some(sel) = buf.selected_text() {
                                 self.pending_clipboard_action = Some(ClipboardAction::SetPrimary(sel));
                             }
                         } else {
-                            self.cursor_pos = char_idx;
-                            self.selection = Some((char_idx, char_idx));
+                            buf.set_selection(char_idx, char_idx);
                             self.is_dragging_selection = true;
                         }
+                        self.apply_edit_buffer(buf);
                         return EventResponse::Handled;
                     } else if button == MouseButton::Middle {
                         self.is_focused = true;
-                        self.cursor_visible = true;
-                        self.cursor_timer_ms = 0.0;
-                        let total_chars = self.text.get().chars().count();
-                        let char_idx = self.char_index_from_x(x).min(total_chars);
-                        self.cursor_pos = char_idx;
-                        self.selection = None;
+                        self.preedit = None;
+                        self.reset_caret_blink();
+                        let mut buf = self.edit_buffer();
+                        let char_idx = self.char_index_from_x(x).min(buf.char_len());
+                        buf.set_cursor(char_idx);
+                        self.apply_edit_buffer(buf);
                         self.pending_clipboard_action = Some(ClipboardAction::RequestPaste(
                             crate::platform::clipboard::SelectionTarget::Primary,
                         ));
@@ -349,26 +475,28 @@ impl Widget for TextInput {
             }
             PointerEvent::Move { x, .. } => {
                 if self.is_dragging_selection {
-                    let total_chars = self.text.get().chars().count();
+                    let mut buf = self.edit_buffer();
+                    let total_chars = buf.char_len();
                     let char_idx = self.char_index_from_x(x).min(total_chars);
-                    let anchor = self.selection.map(|(a, _)| a).unwrap_or(self.cursor_pos).min(total_chars);
-                    self.selection = Some((anchor, char_idx));
-                    self.cursor_pos = char_idx;
-                    self.cursor_visible = true;
-                    self.cursor_timer_ms = 0.0;
+                    let anchor = buf.anchor().unwrap_or(buf.cursor()).min(total_chars);
+                    buf.set_selection(anchor, char_idx);
+                    self.apply_edit_buffer(buf);
+                    self.reset_caret_blink();
                     return EventResponse::Handled;
                 }
             }
             PointerEvent::Up { button, .. } => {
                 if button == MouseButton::Left && self.is_dragging_selection {
                     self.is_dragging_selection = false;
-                    if let Some((a, f)) = self.selection {
+                    let mut buf = self.edit_buffer();
+                    if let Some((a, f)) = buf.selection_pair() {
                         if a == f {
-                            self.selection = None;
-                        } else if let Some(sel) = self.selected_text() {
+                            buf.clear_selection();
+                        } else if let Some(sel) = buf.selected_text() {
                             self.pending_clipboard_action = Some(ClipboardAction::SetPrimary(sel));
                         }
                     }
+                    self.apply_edit_buffer(buf);
                     return EventResponse::Handled;
                 }
             }
@@ -387,29 +515,53 @@ impl Widget for TextInput {
         }
 
         match event {
-            KeyEvent::KeyDown { key, keysym, text, modifiers } => {
-                let current = self.text.get().clone();
-                let total_chars = current.chars().count();
+            KeyEvent::KeyDown {
+                key,
+                keysym,
+                text,
+                modifiers,
+                is_repeat,
+            } => {
+                if self.preedit.is_some() {
+                    return if crate::text::editing::is_modifier_keysym(key, *keysym) {
+                        EventResponse::Ignored
+                    } else {
+                        EventResponse::Handled
+                    };
+                }
+
+                let mut buf = self.edit_buffer();
+                let total_chars = buf.char_len();
 
                 if modifiers.ctrl && !modifiers.alt && !modifiers.logo {
                     if key == "a" || key == "A" || *keysym == 0x61 || *keysym == 0x41 {
-                        self.selection = Some((0, total_chars));
-                        self.cursor_pos = total_chars;
-                        self.cursor_visible = true;
-                        self.cursor_timer_ms = 0.0;
-                        if let Some(sel) = self.selected_text() {
-                            self.pending_clipboard_action = Some(ClipboardAction::SetPrimary(sel));
+                        if !*is_repeat {
+                            buf.select_all();
+                            if let Some(sel) = buf.selected_text() {
+                                self.pending_clipboard_action =
+                                    Some(ClipboardAction::SetPrimary(sel));
+                            }
+                            self.apply_edit_buffer(buf);
+                            self.reset_caret_blink();
                         }
                         return EventResponse::Handled;
                     } else if key == "c" || key == "C" || *keysym == 0x63 || *keysym == 0x43 {
-                        if let Some(sel) = self.selected_text() {
-                            self.pending_clipboard_action = Some(ClipboardAction::SetClipboard(sel));
+                        if !*is_repeat {
+                            if let Some(sel) = buf.selected_text() {
+                                self.pending_clipboard_action =
+                                    Some(ClipboardAction::SetClipboard(sel));
+                            }
                         }
                         return EventResponse::Handled;
                     } else if key == "x" || key == "X" || *keysym == 0x78 || *keysym == 0x58 {
-                        if let Some(sel) = self.selected_text() {
-                            self.pending_clipboard_action = Some(ClipboardAction::SetClipboard(sel));
-                            self.delete_selection();
+                        if !*is_repeat {
+                            if let Some(sel) = buf.selected_text() {
+                                self.pending_clipboard_action =
+                                    Some(ClipboardAction::SetClipboard(sel));
+                                buf.delete_selection();
+                                self.apply_edit_buffer(buf);
+                                self.reset_caret_blink();
+                            }
                         }
                         return EventResponse::Handled;
                     } else if key == "v" || key == "V" || *keysym == 0x76 || *keysym == 0x56 {
@@ -421,116 +573,84 @@ impl Widget for TextInput {
                 }
 
                 if key == "Backspace" || *keysym == 0xff08 {
-                    if self.delete_selection() {
+                    let changed = if modifiers.ctrl {
+                        buf.delete_word_backward()
+                    } else {
+                        buf.backspace()
+                    };
+                    if changed {
+                        self.apply_edit_buffer(buf);
+                        self.reset_caret_blink();
                         return EventResponse::Handled;
-                    }
-                    if self.cursor_pos > 0 && !current.is_empty() {
-                        let mut chars: Vec<char> = current.chars().collect();
-                        if self.cursor_pos <= chars.len() {
-                            chars.remove(self.cursor_pos - 1);
-                            self.cursor_pos -= 1;
-                            self.text.set(chars.into_iter().collect());
-                            self.cursor_visible = true;
-                            self.cursor_timer_ms = 0.0;
-                            return EventResponse::Handled;
-                        }
                     }
                 } else if key == "Delete" || *keysym == 0xffff {
-                    if self.delete_selection() {
-                        return EventResponse::Handled;
-                    }
-                    let mut chars: Vec<char> = current.chars().collect();
-                    if self.cursor_pos < chars.len() {
-                        chars.remove(self.cursor_pos);
-                        self.text.set(chars.into_iter().collect());
-                        self.cursor_visible = true;
-                        self.cursor_timer_ms = 0.0;
+                    let changed = if modifiers.ctrl {
+                        buf.delete_word_forward()
+                    } else {
+                        buf.delete_forward()
+                    };
+                    if changed {
+                        self.apply_edit_buffer(buf);
+                        self.reset_caret_blink();
                         return EventResponse::Handled;
                     }
                 } else if key == "Home" || *keysym == 0xff50 {
+                    buf.move_to(0, modifiers.shift);
                     if modifiers.shift {
-                        let anchor = self.selection.map(|(a, _)| a).unwrap_or(self.cursor_pos);
-                        self.cursor_pos = 0;
-                        self.selection = Some((anchor, 0));
-                        if let Some(sel) = self.selected_text() {
+                        if let Some(sel) = buf.selected_text() {
                             self.pending_clipboard_action = Some(ClipboardAction::SetPrimary(sel));
                         }
-                    } else {
-                        self.selection = None;
-                        self.cursor_pos = 0;
                     }
-                    self.cursor_visible = true;
-                    self.cursor_timer_ms = 0.0;
+                    self.apply_edit_buffer(buf);
+                    self.reset_caret_blink();
                     return EventResponse::Handled;
                 } else if key == "End" || *keysym == 0xff57 {
+                    buf.move_to(total_chars, modifiers.shift);
                     if modifiers.shift {
-                        let anchor = self.selection.map(|(a, _)| a).unwrap_or(self.cursor_pos);
-                        self.cursor_pos = total_chars;
-                        self.selection = Some((anchor, total_chars));
-                        if let Some(sel) = self.selected_text() {
+                        if let Some(sel) = buf.selected_text() {
                             self.pending_clipboard_action = Some(ClipboardAction::SetPrimary(sel));
                         }
-                    } else {
-                        self.selection = None;
-                        self.cursor_pos = total_chars;
                     }
-                    self.cursor_visible = true;
-                    self.cursor_timer_ms = 0.0;
+                    self.apply_edit_buffer(buf);
+                    self.reset_caret_blink();
                     return EventResponse::Handled;
                 } else if key == "Left" || *keysym == 0xff51 {
+                    if modifiers.ctrl {
+                        buf.move_word_left(modifiers.shift);
+                    } else {
+                        buf.move_left(modifiers.shift);
+                    }
                     if modifiers.shift {
-                        let anchor = self.selection.map(|(a, _)| a).unwrap_or(self.cursor_pos);
-                        if self.cursor_pos > 0 {
-                            self.cursor_pos -= 1;
-                        }
-                        self.selection = Some((anchor, self.cursor_pos));
-                        if let Some(sel) = self.selected_text() {
+                        if let Some(sel) = buf.selected_text() {
                             self.pending_clipboard_action = Some(ClipboardAction::SetPrimary(sel));
                         }
-                    } else if let Some((start, _)) = self.selection_range() {
-                        self.cursor_pos = start;
-                        self.selection = None;
-                    } else if self.cursor_pos > 0 {
-                        self.cursor_pos -= 1;
                     }
-                    self.cursor_visible = true;
-                    self.cursor_timer_ms = 0.0;
+                    self.apply_edit_buffer(buf);
+                    self.reset_caret_blink();
                     return EventResponse::Handled;
                 } else if key == "Right" || *keysym == 0xff53 {
+                    if modifiers.ctrl {
+                        buf.move_word_right(modifiers.shift);
+                    } else {
+                        buf.move_right(modifiers.shift);
+                    }
                     if modifiers.shift {
-                        let anchor = self.selection.map(|(a, _)| a).unwrap_or(self.cursor_pos);
-                        if self.cursor_pos < total_chars {
-                            self.cursor_pos += 1;
-                        }
-                        self.selection = Some((anchor, self.cursor_pos));
-                        if let Some(sel) = self.selected_text() {
+                        if let Some(sel) = buf.selected_text() {
                             self.pending_clipboard_action = Some(ClipboardAction::SetPrimary(sel));
                         }
-                    } else if let Some((_, end)) = self.selection_range() {
-                        self.cursor_pos = end;
-                        self.selection = None;
-                    } else if self.cursor_pos < total_chars {
-                        self.cursor_pos += 1;
                     }
-                    self.cursor_visible = true;
-                    self.cursor_timer_ms = 0.0;
+                    self.apply_edit_buffer(buf);
+                    self.reset_caret_blink();
                     return EventResponse::Handled;
                 } else if let Some(t) = text {
                     if !modifiers.ctrl && !modifiers.alt && !modifiers.logo {
-                        self.delete_selection();
-                        let mut chars: Vec<char> = self.text.get().chars().collect();
-                        let mut pos = self.cursor_pos.min(chars.len());
-                        for c in t.chars() {
-                            if !c.is_control() {
-                                chars.insert(pos, c);
-                                pos += 1;
-                            }
+                        let filtered: String = t.chars().filter(|c| !c.is_control()).collect();
+                        if !filtered.is_empty() {
+                            buf.insert(&filtered);
+                            self.apply_edit_buffer(buf);
+                            self.reset_caret_blink();
+                            return EventResponse::Handled;
                         }
-                        self.cursor_pos = pos;
-                        self.text.set(chars.into_iter().collect());
-                        self.cursor_visible = true;
-                        self.cursor_timer_ms = 0.0;
-                        return EventResponse::Handled;
                     }
                 }
             }
@@ -550,6 +670,10 @@ impl Widget for TextInput {
         vector_atlas: &mut VectorAtlas,
         scale: f32,
     ) -> Vec<RenderPrimitive> {
+        if self.cached_shaper.borrow().is_none() {
+            *self.cached_shaper.borrow_mut() = Some(shaper.clone());
+        }
+
         let mut prims = Vec::new();
 
         let border_color = if self.is_focused {
@@ -613,8 +737,13 @@ impl Widget for TextInput {
             0.0
         };
 
-        let is_empty = self.text.get().is_empty();
-        let display_text = if is_empty {
+        let composed = self.compose_display_string();
+        let has_preedit = composed.is_some();
+        let is_empty = self.text.get().is_empty() && !has_preedit;
+
+        let display_text: &str = if let Some((ref combined, _, _, _)) = composed {
+            combined.as_str()
+        } else if is_empty {
             &self.placeholder
         } else {
             self.text.get()
@@ -627,20 +756,35 @@ impl Widget for TextInput {
         };
 
         let shaped = shaper.shape(display_text, self.font_size);
+        let display_chars = if is_empty {
+            0
+        } else {
+            display_text.chars().count()
+        };
+        let char_positions = if is_empty {
+            vec![0.0]
+        } else {
+            shaped.char_x_positions(display_chars)
+        };
+
         let text_area_x = rect.x + self.style.padding.left + icon_offset;
         let text_area_w = (rect.x + rect.width - self.style.padding.right - text_area_x).max(0.0);
         let text_area_y = rect.y;
         let text_area_h = rect.height;
 
+        let active_cursor_char = if let Some((_, _, _, active_char)) = composed {
+            active_char.min(display_chars)
+        } else {
+            self.cursor_pos.min(display_chars)
+        };
+
         let cursor_rel_x = if is_empty {
             0.0
         } else {
-            let cursor = self.cursor_pos.min(shaped.glyphs.len());
-            if cursor < shaped.glyphs.len() {
-                shaped.glyphs[cursor].x
-            } else {
-                shaped.width
-            }
+            char_positions
+                .get(active_cursor_char)
+                .copied()
+                .unwrap_or(shaped.width)
         };
 
         let mut scroll_x = self.scroll_offset_x.get();
@@ -655,6 +799,7 @@ impl Widget for TextInput {
             scroll_x = scroll_x.clamp(0.0, (shaped.width - text_area_w + 12.0).max(0.0));
         }
         self.scroll_offset_x.set(scroll_x);
+        self.cached_cursor_rel_x.set(cursor_rel_x);
 
         let text_logical_x = text_area_x - scroll_x;
         self.cached_text_origin_x.set(text_logical_x);
@@ -662,15 +807,15 @@ impl Widget for TextInput {
         let cap_height = self.font_size * 0.70;
         let text_logical_baseline = center_y + cap_height * 0.5;
 
-        if is_empty {
+        if !has_preedit {
+            *self.cached_glyph_positions.borrow_mut() = char_positions.clone();
+        } else if self.text.get().is_empty() {
             *self.cached_glyph_positions.borrow_mut() = vec![0.0];
         } else {
-            let mut positions = Vec::with_capacity(shaped.glyphs.len() + 1);
-            for g in &shaped.glyphs {
-                positions.push(g.x);
-            }
-            positions.push(shaped.width);
-            *self.cached_glyph_positions.borrow_mut() = positions;
+            let committed_shaped = shaper.shape(self.text.get(), self.font_size);
+            let committed_chars = self.text.get().chars().count();
+            *self.cached_glyph_positions.borrow_mut() =
+                committed_shaped.char_x_positions(committed_chars);
         }
 
         prims.push(RenderPrimitive::ClipPush {
@@ -682,12 +827,11 @@ impl Widget for TextInput {
             ],
         });
 
-        if !is_empty {
+        if !is_empty && !has_preedit {
             if let Some((start, end)) = self.selection_range() {
                 if start < end {
-                    let cached = self.cached_glyph_positions.borrow();
-                    let x_start = cached.get(start).copied().unwrap_or(0.0);
-                    let x_end = cached.get(end).copied().unwrap_or(shaped.width);
+                    let x_start = char_positions.get(start).copied().unwrap_or(0.0);
+                    let x_end = char_positions.get(end).copied().unwrap_or(shaped.width);
                     let sel_rect = [
                         (text_logical_x + x_start) * scale,
                         (center_y - self.font_size * 0.6) * scale,
@@ -703,8 +847,6 @@ impl Widget for TextInput {
             }
         }
 
-        let cursor_screen_x = (text_logical_x + cursor_rel_x) * scale;
-
         crate::text::emit_text_glyphs(
             &shaped,
             text_logical_x,
@@ -717,7 +859,45 @@ impl Widget for TextInput {
             &mut prims,
         );
 
-        if self.is_focused && self.cursor_visible {
+        if let Some((_, pre_start, pre_end, _)) = composed {
+            let x_start = char_positions.get(pre_start).copied().unwrap_or(0.0);
+            let x_end = char_positions.get(pre_end).copied().unwrap_or(shaped.width);
+            let underline_y = (text_logical_baseline + 2.0) * scale;
+            prims.push(RenderPrimitive::solid_rect(
+                [
+                    (text_logical_x + x_start) * scale,
+                    underline_y,
+                    ((x_end - x_start).max(1.0)) * scale,
+                    1.5 * scale,
+                ],
+                theme.colors.text,
+                0.5 * scale,
+            ));
+
+            if let Some(pre) = &self.preedit {
+                if pre.cursor_begin >= 0 && pre.cursor_end > pre.cursor_begin {
+                    let c_start =
+                        pre_start + byte_to_char_clamped(&pre.text, pre.cursor_begin as usize);
+                    let c_end =
+                        pre_start + byte_to_char_clamped(&pre.text, pre.cursor_end as usize);
+                    if c_start < c_end {
+                        let cx_start = char_positions.get(c_start).copied().unwrap_or(x_start);
+                        let cx_end = char_positions.get(c_end).copied().unwrap_or(x_end);
+                        prims.push(RenderPrimitive::solid_rect(
+                            [
+                                (text_logical_x + cx_start) * scale,
+                                underline_y,
+                                ((cx_end - cx_start).max(1.0)) * scale,
+                                2.5 * scale,
+                            ],
+                            theme.colors.primary,
+                            0.5 * scale,
+                        ));
+                    }
+                }
+            }
+        } else if self.is_focused && self.cursor_visible {
+            let cursor_screen_x = (text_logical_x + cursor_rel_x) * scale;
             let cursor_h = self.font_size * 1.2 * scale;
             let cursor_y = (center_y - self.font_size * 0.6) * scale;
             prims.push(RenderPrimitive::solid_rect(
@@ -756,6 +936,7 @@ mod tests {
             keysym: 0,
             text: Some("h".to_string()),
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert_eq!(r1, EventResponse::Ignored);
         assert_eq!(input.text.get(), "");
@@ -768,12 +949,14 @@ mod tests {
             keysym: 0,
             text: Some("H".to_string()),
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         input.on_key_event(&KeyEvent::KeyDown {
             key: "i".to_string(),
             keysym: 0,
             text: Some("i".to_string()),
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert_eq!(input.text.get(), "Hi");
         assert_eq!(input.cursor_pos, 2);
@@ -783,6 +966,7 @@ mod tests {
             keysym: 0xff08,
             text: None,
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert_eq!(input.text.get(), "H");
         assert_eq!(input.cursor_pos, 1);
@@ -792,6 +976,7 @@ mod tests {
             keysym: 0xff50,
             text: None,
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert_eq!(input.cursor_pos, 0);
 
@@ -800,6 +985,7 @@ mod tests {
             keysym: 0,
             text: Some("A".to_string()),
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert_eq!(input.text.get(), "AH");
         assert_eq!(input.cursor_pos, 1);
@@ -809,6 +995,7 @@ mod tests {
             keysym: 0xffff,
             text: None,
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert_eq!(input.text.get(), "A");
     }
@@ -826,6 +1013,7 @@ mod tests {
             keysym: 0x61,
             text: None,
             modifiers: Modifiers { ctrl: true, ..Default::default() },
+            is_repeat: false,
         });
         assert_eq!(r, EventResponse::Handled);
         assert_eq!(input.selection, Some((0, 11)));
@@ -841,6 +1029,7 @@ mod tests {
             keysym: 0x63,
             text: None,
             modifiers: Modifiers { ctrl: true, ..Default::default() },
+            is_repeat: false,
         });
         assert_eq!(r, EventResponse::Handled);
         assert_eq!(
@@ -854,6 +1043,7 @@ mod tests {
             keysym: 0x78,
             text: None,
             modifiers: Modifiers { ctrl: true, ..Default::default() },
+            is_repeat: false,
         });
         assert_eq!(r, EventResponse::Handled);
         assert_eq!(
@@ -879,6 +1069,7 @@ mod tests {
             keysym: 0x76,
             text: None,
             modifiers: Modifiers { ctrl: true, ..Default::default() },
+            is_repeat: false,
         });
         assert_eq!(r, EventResponse::Handled);
         assert_eq!(
@@ -924,6 +1115,7 @@ mod tests {
             keysym: 0x61,
             text: Some("a".to_string()),
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert_eq!(r, EventResponse::Handled);
         assert_eq!(input.text.get(), "a");
@@ -972,5 +1164,176 @@ mod tests {
             1.0,
         );
         assert_eq!(input.scroll_offset_x.get(), 0.0, "Expected scroll to reset when cursor at start");
+    }
+
+    #[test]
+    fn test_text_input_ime_preedit_commit_delete_and_cursor_rect() {
+        let mut input = TextInput::new("Placeholder").with_width(240.0);
+        let rect = LayoutRect::new(10.0, 20.0, 240.0, 36.0);
+
+        // Unfocused reports no IME cursor rectangle and ignores IME events
+        assert!(input.ime_cursor_rect(rect).is_none());
+        assert_eq!(
+            input.on_ime_event(&ImeEvent::Commit("ignored".into())),
+            EventResponse::Ignored
+        );
+
+        input.on_focus_change(true);
+        let r0 = input.ime_cursor_rect(rect).expect("IME rect when focused");
+        assert!(r0.x >= rect.x && r0.x <= rect.x + rect.width);
+
+        // Preedit is displayed with underline, hides caret, and does not mutate committed text
+        assert_eq!(
+            input.on_ime_event(&ImeEvent::Preedit {
+                text: "にほん".into(),
+                cursor_begin: 9,
+                cursor_end: 9,
+            }),
+            EventResponse::Handled
+        );
+        assert_eq!(input.text.get(), "");
+        assert_eq!(input.preedit_text(), Some("にほん"));
+        let r_pre = input.ime_cursor_rect(rect).expect("IME rect during preedit");
+        assert!(r_pre.x > r0.x, "IME cursor rect should advance with preedit");
+
+        let theme = Theme::dark();
+        let mut atlas = GlyphAtlas::new(512, 512, 1);
+        let shaper = TextShaper::default_system_font().expect("Font available");
+        let rasterizer = GlyphRasterizer::new(shaper.font_db().clone());
+        let mut vector_atlas = VectorAtlas::new(512, 512);
+        let prims = input.paint(
+            rect,
+            &theme,
+            &mut atlas,
+            &rasterizer,
+            &shaper,
+            &mut vector_atlas,
+            1.0,
+        );
+        let has_underline = prims.iter().any(|p| match p {
+            RenderPrimitive::Rect { rect: r, border: None, use_texture: false, .. } => {
+                (r[3] - 1.5).abs() < 0.01 && r[2] > 5.0
+            }
+            _ => false,
+        });
+        let has_caret = prims.iter().any(|p| match p {
+            RenderPrimitive::Rect { rect: r, border: None, use_texture: false, .. } => {
+                (r[2] - 2.0).abs() < 0.01 && r[3] > 10.0
+            }
+            _ => false,
+        });
+        assert!(has_underline, "Expected preedit underline primitive");
+        assert!(!has_caret, "Caret must be hidden while IME preedit is active");
+
+        // Commit replaces preedit and inserts into buffer
+        assert_eq!(
+            input.on_ime_event(&ImeEvent::Commit("日本語".into())),
+            EventResponse::Handled
+        );
+        assert_eq!(input.preedit_text(), None);
+        assert_eq!(input.text.get(), "日本語");
+        assert_eq!(input.cursor_pos, 3);
+
+        // DeleteSurrounding removes 3 UTF-8 bytes before cursor ('語')
+        assert_eq!(
+            input.on_ime_event(&ImeEvent::DeleteSurrounding {
+                before: 3,
+                after: 0,
+            }),
+            EventResponse::Handled
+        );
+        assert_eq!(input.text.get(), "日本");
+        assert_eq!(input.cursor_pos, 2);
+    }
+
+    #[test]
+    fn test_text_input_preedit_suppresses_raw_keydown_and_noop_paste_preserves_selection() {
+        let mut input = TextInput::new("");
+        input.text.set("hello".into());
+        input.on_focus_change(true);
+        input.cursor_pos = 5;
+
+        input.on_ime_event(&ImeEvent::Preedit {
+            text: "か".into(),
+            cursor_begin: 3,
+            cursor_end: 3,
+        });
+        assert!(input.has_ime_preedit());
+
+        assert_eq!(
+            input.on_key_event(&KeyEvent::KeyDown {
+                key: "Left".into(),
+                keysym: 0xff51,
+                text: None,
+                modifiers: Modifiers::default(),
+                is_repeat: false,
+            }),
+            EventResponse::Handled
+        );
+        assert_eq!(input.cursor_pos, 5);
+        assert_eq!(input.text.get(), "hello");
+
+        assert_eq!(
+            input.on_key_event(&KeyEvent::KeyDown {
+                key: "a".into(),
+                keysym: 0x61,
+                text: Some("a".into()),
+                modifiers: Modifiers::default(),
+                is_repeat: false,
+            }),
+            EventResponse::Handled
+        );
+        assert_eq!(input.text.get(), "hello");
+
+        assert_eq!(
+            input.on_key_event(&KeyEvent::KeyDown {
+                key: "Shift_L".into(),
+                keysym: 0xffe1,
+                text: None,
+                modifiers: Modifiers {
+                    shift: true,
+                    ..Default::default()
+                },
+                is_repeat: false,
+            }),
+            EventResponse::Ignored
+        );
+
+        input.on_ime_event(&ImeEvent::Preedit {
+            text: String::new(),
+            cursor_begin: 0,
+            cursor_end: 0,
+        });
+        assert!(!input.has_ime_preedit());
+
+        input.selection = Some((0, 5));
+        input.cursor_pos = 5;
+        input.on_paste("\n\r", false);
+        assert_eq!(input.text.get(), "hello");
+        assert_eq!(input.selection_range(), Some((0, 5)));
+
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        input.on_key_event(&KeyEvent::KeyDown {
+            key: "c".into(),
+            keysym: 0x63,
+            text: None,
+            modifiers: ctrl,
+            is_repeat: true,
+        });
+        assert_eq!(input.take_clipboard_action(), None);
+        input.on_key_event(&KeyEvent::KeyDown {
+            key: "c".into(),
+            keysym: 0x63,
+            text: None,
+            modifiers: ctrl,
+            is_repeat: false,
+        });
+        assert_eq!(
+            input.take_clipboard_action(),
+            Some(ClipboardAction::SetClipboard("hello".into()))
+        );
     }
 }

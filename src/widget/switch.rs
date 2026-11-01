@@ -120,8 +120,10 @@ impl Widget for Switch {
 
     fn on_key_event(&mut self, event: &KeyEvent) -> EventResponse {
         if self.is_focused {
-            if let KeyEvent::KeyDown { key, keysym, .. } = event {
-                if key == "Return" || key == "Space" || *keysym == 0xff0d || *keysym == 0x20 {
+            if let KeyEvent::KeyDown { key, keysym, is_repeat, .. } = event {
+                if !*is_repeat
+                    && (key == "Return" || key == "Space" || *keysym == 0xff0d || *keysym == 0x20)
+                {
                     self.toggle();
                     return EventResponse::Handled;
                 }
@@ -260,6 +262,7 @@ mod tests {
             keysym: 0xff0d,
             text: Some("\n".to_string()),
             modifiers: Modifiers::default(),
+            is_repeat: false,
         });
         assert!(!*sw.checked.get());
     }
