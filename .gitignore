@@ -1,0 +1,28 @@
+# Build output directories
+build/
+out/
+bin/
+
+# CMake artifacts
+CMakeUserPresets.json
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+
+# Visual Studio & IDE caches
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Compiled binaries and debug symbols
+*.obj
+*.o
+*.pdb
+*.ilk
+*.idb
+*.exe
+*.dll
+*.lib
+*.a

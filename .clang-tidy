@@ -1,0 +1,36 @@
+---
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  cppcoreguidelines-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -clang-analyzer-osx*,
+  -bugprone-exception-escape,
+  -bugprone-throw-keyword-missing,
+  -bugprone-unhandled-exception-at-new,
+  -modernize-use-uncaught-exceptions,
+  -cppcoreguidelines-pro-type-static-cast-downcast,
+  -cppcoreguidelines-avoid-magic-numbers,
+  -readability-magic-numbers,
+  -readability-uppercase-literal-suffix,
+  -cppcoreguidelines-pro-bounds-pointer-arithmetic,
+  -cppcoreguidelines-pro-bounds-array-to-pointer-decay,
+  -cppcoreguidelines-pro-type-vararg,
+  -modernize-use-trailing-return-type,
+  -readability-identifier-length
+
+WarningsAsErrors: '*'
+
+HeaderFilterRegex: '^(src|tests)/.*'
+
+FormatStyle: file
+
+CheckOptions:
+  modernize-use-nullptr.NullMacros: 'NULL'
+  cppcoreguidelines-special-member-functions.AllowMissingMoveFunctions: 'true'
+  readability-function-cognitive-complexity.Threshold: '25'
+  performance-move-const-arg.CheckTriviallyCopyableMove: 'false'
+---
