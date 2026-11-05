@@ -128,6 +128,11 @@ bool D3D11Device::init_swapchain(HWND hwnd, uint32_t width, uint32_t height) {
     if (FAILED(device_.As(&dxgi_device)))
         return false;
 
+    Microsoft::WRL::ComPtr<IDXGIDevice1> dxgi_device1;
+    if (SUCCEEDED(device_.As(&dxgi_device1))) {
+        dxgi_device1->SetMaximumFrameLatency(1);
+    }
+
     Microsoft::WRL::ComPtr<IDXGIAdapter> adapter;
     if (FAILED(dxgi_device->GetAdapter(&adapter)))
         return false;
@@ -373,12 +378,33 @@ std::optional<PipelineId> D3D11Device::create_pipeline(std::span<const uint8_t> 
         {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_INSTANCE_DATA, 1},
         {"CLIP_RECT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 48, D3D11_INPUT_PER_INSTANCE_DATA, 1}};
 
+    const D3D11_INPUT_ELEMENT_DESC path_layout_desc[] = {
+        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"AA_COVERAGE", 0, DXGI_FORMAT_R32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"CLIP_RECT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0}};
+
+    const D3D11_INPUT_ELEMENT_DESC image_layout_desc[] = {
+        {"RECT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+        {"UV_RECT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+        {"RADII", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 32, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+        {"TINT_COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 48, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+        {"BORDER_COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 64, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+        {"BORDER_WIDTH", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 80, D3D11_INPUT_PER_INSTANCE_DATA, 1},
+        {"CLIP_RECT", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 96, D3D11_INPUT_PER_INSTANCE_DATA, 1}};
+
     const D3D11_INPUT_ELEMENT_DESC* layout_elements = quad_layout_desc;
     UINT num_elements = static_cast<UINT>(std::size(quad_layout_desc));
 
     if (layout == VertexLayout::Glyph) {
         layout_elements = glyph_layout_desc;
         num_elements = static_cast<UINT>(std::size(glyph_layout_desc));
+    } else if (layout == VertexLayout::Path) {
+        layout_elements = path_layout_desc;
+        num_elements = static_cast<UINT>(std::size(path_layout_desc));
+    } else if (layout == VertexLayout::Image) {
+        layout_elements = image_layout_desc;
+        num_elements = static_cast<UINT>(std::size(image_layout_desc));
     }
 
     hr = device_->CreateInputLayout(layout_elements, num_elements, vs_bytecode.data(),
@@ -478,6 +504,31 @@ void D3D11Device::set_instance_buffer(BufferId id, uint32_t stride) {
     context_->IASetVertexBuffers(0, 1, bufs, strides, offsets);
 }
 
+void D3D11Device::set_vertex_buffer(BufferId id, uint32_t stride, uint32_t offset) {
+    if (id == kInvalidBuffer || id > buffers_.size() || !context_)
+        return;
+    auto& rec = buffers_[id - 1];
+    if (!rec.active || !rec.buffer)
+        return;
+
+    UINT strides[1] = {stride};
+    UINT offsets[1] = {offset};
+    ID3D11Buffer* bufs[1] = {rec.buffer.Get()};
+    context_->IASetVertexBuffers(0, 1, bufs, strides, offsets);
+}
+
+void D3D11Device::set_index_buffer(BufferId id, IndexFormat format, uint32_t offset) {
+    if (id == kInvalidBuffer || id > buffers_.size() || !context_)
+        return;
+    auto& rec = buffers_[id - 1];
+    if (!rec.active || !rec.buffer)
+        return;
+
+    DXGI_FORMAT dxgi_format =
+        (format == IndexFormat::UInt16) ? DXGI_FORMAT_R16_UINT : DXGI_FORMAT_R32_UINT;
+    context_->IASetIndexBuffer(rec.buffer.Get(), dxgi_format, offset);
+}
+
 void D3D11Device::set_constants(uint32_t slot, std::span<const uint8_t> data) {
     if (!context_ || !device_ || data.empty())
         return;
@@ -538,6 +589,13 @@ void D3D11Device::draw_instanced(uint32_t vertex_count_per_instance, uint32_t in
         return;
     context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
     context_->DrawInstanced(vertex_count_per_instance, instance_count, 0, 0);
+}
+
+void D3D11Device::draw_indexed(uint32_t index_count, uint32_t start_index, int32_t base_vertex) {
+    if (!context_ || index_count == 0)
+        return;
+    context_->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    context_->DrawIndexed(index_count, start_index, base_vertex);
 }
 
 void D3D11Device::end_frame() {

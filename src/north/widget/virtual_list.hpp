@@ -17,6 +17,7 @@ public:
     VirtualListBuilder& height(float h);
     VirtualListBuilder& smooth_scroll(bool enable = true);
     VirtualListBuilder& theme(const style::Theme& theme);
+    VirtualListBuilder& theme_signal(core::Signal<style::Theme>* sig);
     VirtualListBuilder& scrollbar_style(const ScrollbarStyle& style);
     VirtualListBuilder& scroll_offset(float y);
 

@@ -17,6 +17,7 @@ public:
     SliderBuilder& bind(core::Signal<float>& signal);
     SliderBuilder& width(float w);
     SliderBuilder& theme(const style::Theme& theme);
+    SliderBuilder& theme_signal(core::Signal<style::Theme>* sig);
     SliderBuilder& on_change(void (*fn)(float value, void* user_data), void* user_data = nullptr);
 
     [[nodiscard]] core::Handle<core::Node> build();

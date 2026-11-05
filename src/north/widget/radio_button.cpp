@@ -8,12 +8,13 @@
 namespace north::widget {
 
 void RadioButtonData::update_targets() {
+    float duration = ring_color.is_animating() ? 0.05f : 0.12f;
     if (selected) {
         dot_scale.spring_to(1.0f, animation::SpringDesc::snappy());
-        ring_color.tween_to(ring_active_color, 0.12f, animation::CubicBezier::ease_out());
+        ring_color.tween_to(ring_active_color, duration, animation::CubicBezier::ease_out());
     } else {
         dot_scale.spring_to(0.0f, animation::SpringDesc::snappy());
-        ring_color.tween_to(ring_inactive_color, 0.12f, animation::CubicBezier::ease_out());
+        ring_color.tween_to(ring_inactive_color, duration, animation::CubicBezier::ease_out());
     }
 }
 
@@ -36,6 +37,27 @@ void RadioButtonData::select() {
     }
     if (grp) {
         grp->set(val);
+    }
+}
+
+void RadioButtonData::apply_theme(const style::Theme& theme) {
+    const auto& c = theme.colors();
+    ring_inactive_color = c.outline;
+    ring_active_color = c.primary;
+    dot_color = c.primary;
+    focus_ring_color = c.primary;
+    text_color = c.on_surface;
+    if (paragraph) {
+        paragraph = nullptr;
+    }
+    float duration = theme.transition_duration();
+    if (duration <= 0.0f) {
+        ring_color.set_immediate(selected ? ring_active_color : ring_inactive_color);
+    } else {
+        update_targets();
+    }
+    if (tree && node_handle.is_valid()) {
+        tree->mark_dirty(node_handle, core::kPaint);
     }
 }
 
@@ -191,6 +213,14 @@ RadioButtonBuilder& RadioButtonBuilder::theme(const style::Theme& theme) {
     return *this;
 }
 
+RadioButtonBuilder& RadioButtonBuilder::theme_signal(core::Signal<style::Theme>* sig) {
+    data_.theme_signal = sig;
+    if (sig) {
+        theme(sig->get());
+    }
+    return *this;
+}
+
 RadioButtonBuilder& RadioButtonBuilder::on_select(void (*fn)(int, void*), void* user_data) {
     data_.on_select = fn;
     data_.select_user_data = user_data;
@@ -267,6 +297,17 @@ core::Handle<core::Node> RadioButtonBuilder::build() {
                 }
             },
             heap_data);
+    }
+
+    if (heap_data->theme_signal) {
+        heap_data->theme_signal->bind_dirty(
+            [](void* ctx, uint32_t) {
+                auto* rb = static_cast<RadioButtonData*>(ctx);
+                if (rb && rb->theme_signal) {
+                    rb->apply_theme(rb->theme_signal->get());
+                }
+            },
+            heap_data, core::kPaint);
     }
 
     node->user_data = heap_data;

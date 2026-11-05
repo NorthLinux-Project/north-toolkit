@@ -21,6 +21,7 @@ public:
     CheckboxBuilder& font(std::shared_ptr<text::Font> font);
     CheckboxBuilder& font_size(float size);
     CheckboxBuilder& theme(const style::Theme& theme);
+    CheckboxBuilder& theme_signal(core::Signal<style::Theme>* sig);
     CheckboxBuilder& on_change(void (*fn)(bool checked, void* user_data),
                                void* user_data = nullptr);
 

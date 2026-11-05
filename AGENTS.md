@@ -7,26 +7,33 @@ North Toolkit is a high-performance, GPU-accelerated, cross-platform UI toolkit 
 The toolkit is structured as a unidirectional reactive pipeline:
 
 ```text
-User Code / Widgets (north::widgets, north::style)
+User Code / Widgets (north::widget, north::style)
          │
          ▼
-Reactive Signals (north::Signal<T>, north::Computed<T>)
+Reactive Signals (north::core::Signal<T>, north::core::Computed<T>)
          │ (dirty bit bubbling)
          ▼
-Retained Tree (north::NodeTree, north::Node in SlabPool<Node>)
+Retained Tree (north::core::NodeTree, north::core::Node in SlabPool<Node>)
          │
-         ├──► Layout Engine (north::BoxConstraints, north::FlexLayout, north::StackLayout)
+         ├──► Layout Engine (north::layout::BoxConstraints, FlexLayout, StackLayout)
          │
-         └──► Text Pipeline (HarfBuzz, FreeType, SheenBidi, libunibreak, DirectWrite fallback)
-                     │
-                     ▼
-             Dynamic GPU GlyphAtlas (R8, skyline shelf, subpixel bins)
+         ├──► Text Pipeline (HarfBuzz, FreeType, SheenBidi, libunibreak, DirectWrite fallback)
+         │           │
+         │           ▼
+         │   Dynamic GPU GlyphAtlas (R8, skyline shelf, subpixel bins)
+         │
+         ├──► Vector Paths & Tessellation (north::render::Path, SvgPathParser, PathTessellator)
+         │
+         ├──► Image Pipeline (WIC ImageDecoder, ImageCache, ContentScale)
+         │
+         └──► Overlay Subsystem (north::overlay::OverlayManager: Dialog, Menu, Popover, Tooltip)
                      │
                      ▼
 DisplayList (Per-frame Arena backed command stream)
          │
          ├──► QuadBatcher (Instanced SDF quads, inner borders, erf shadows)
-         ├──► PathTessellator (Analytic AA 1.0 px fringe)
+         ├──► ImageBatcher (Instanced textured quads with SDF corner clipping)
+         ├──► PathBatcher (Analytic AA 1.0 px fringe)
          └──► GlyphDraw (Subpixel textured glyphs)
                      │
                      ▼
@@ -64,6 +71,7 @@ Platform Shell (north::platform::win32::Win32App, Win32Window, Per-Monitor V2 DP
 ### Geometry & Color Primitives
 - `Point`, `Size`, `Rect`, `Color`, `Edges`, and `CornerRadii` in `north::core` are flat, trivially copyable value types.
 - Colors use normalized `float` values in $[0.0, 1.0]$ with support for premultiplied alpha conversion (`to_premultiplied()`).
+- **Perceptual Color Space (`north::color::HctColor`, `north::style::Theme`)**: Material 3 CAM16 HCT (Hue, Chroma, Tone) perceptual color model with bisection gamut mapping. Generates mathematically harmonious tonal palettes (Primary, Secondary, Tertiary, Neutral, Neutral Variant, Error) with contrast guarantees across light and dark themes.
 
 ### Reactive State & Node Hierarchy
 - **Signals (`north::core::Signal<T>`)**: Encapsulates state values and notifies registered dirty observers. Uses Small Buffer Optimization (SBO) for up to 2 inline observers. Callbacks use raw function pointers and `void*` context to avoid `std::function` allocation overhead.
@@ -76,10 +84,25 @@ Platform Shell (north::platform::win32::Win32App, Win32Window, Per-Monitor V2 DP
 - **Flex Layout (`north::layout::FlexLayout`)**: Two-pass row and column distribution supporting flex grow, shrink, cross-axis stretch, and gap spacing.
 - **Stack Layout (`north::layout::StackLayout`)**: Z-order positioning supporting nine-point alignment for unpositioned children and explicit edge pinning via `PositionedData`.
 
+### Vector Paths & SVG Rendering
+- **Path Geometry (`north::render::Path`, `SvgPathParser`)**: MoveTo, LineTo, QuadTo, CubicTo, Close commands with SVG path string parsing.
+- **Analytic AA Tessellation (`north::render::PathTessellator`, `PathBatcher`)**: Fast polygon flattening and edge extrusion producing 1.0 px anti-aliasing fringes rendered via `path.hlsl`.
+- **Icon Widget (`north::widget::IconBuilder`)**: Declarative vector icons styled according to active theme tokens.
+
+### Overlay Subsystem
+- **Overlay Management (`north::overlay::OverlayManager`)**: Root-attached overlay layer hosting `Dialog`, `Menu`, `Popover`, and `Tooltip` widgets outside normal parent clipping boundaries.
+- **Placement & Collision Detection**: Viewport-aware nine-point anchor positioning with automatic viewport collision flipping (bottom $\leftrightarrow$ top, right $\leftrightarrow$ left) and edge clamping.
+- **Event Interception**: Modal overlays absorb outside pointer events, dismiss on outside click, and handle Escape key navigation.
+
+### Image & Texture Pipeline
+- **WIC Image Decoder (`north::image::ImageDecoder`)**: Zero-dependency decoding for PNG, JPEG, BMP, and ICO via Windows Imaging Component.
+- **Texture Cache (`north::image::ImageCache`)**: Centralized deduplication cache returning reusable GPU `TextureId` handles.
+- **Image Widget (`north::widget::ImageBuilder`)**: Declarative image viewing supporting `Fit`, `Cover`, `Fill`, `None`, and `ScaleDown` content scaling, 9-point alignment, and hardware-accelerated SDF corner clipping and borders via `image.hlsl` and `ImageBatcher`.
+
 ### GPU & Rendering Pipeline
 - **Device Abstraction (`north::gpu::Device`)**: API-agnostic hardware interface operating on lightweight handles (`TextureId`, `BufferId`, `PipelineId`).
 - **Direct3D 11 Backend (`north::gpu::D3D11Device`)**: Flip-discard swapchains (`DXGI_SWAP_EFFECT_FLIP_DISCARD`), DirectComposition visual attachment, waitable frame latency pacing (`IDXGISwapChain2`), and headless offscreen render target support for CI test execution.
-- **Analytic Shaders**: Bufferless quad rendering via `SV_VertexID` in `quad.hlsl` evaluating exact anti-aliased rounded rect SDFs, inner borders, and Evan Wallace rational erf Gaussian box shadows. Glyph rendering via `glyph.hlsl` sampling 8-bit alpha textures with subpixel positioning.
+- **Analytic Shaders**: Bufferless quad rendering via `SV_VertexID` in `quad.hlsl` evaluating exact anti-aliased rounded rect SDFs, inner borders, and Evan Wallace rational erf Gaussian box shadows. Textured quad rendering via `image.hlsl` with bilinear sampling and analytic SDF corner clipping. Vector path rendering via `path.hlsl` with coverage-based anti-aliasing. Glyph rendering via `glyph.hlsl` sampling 8-bit alpha textures with subpixel positioning.
 
 ---
 

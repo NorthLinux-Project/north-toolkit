@@ -1,4 +1,5 @@
 #include "north/render/renderer.hpp"
+#include "north/overlay/overlay_manager.hpp"
 
 namespace north::render {
 
@@ -50,12 +51,27 @@ bool Renderer::init() {
         return false;
     }
 
+    if (!path_batcher_.init(device_)) {
+        glyph_batcher_.shutdown(device_);
+        quad_batcher_.shutdown(device_);
+        return false;
+    }
+
+    if (!image_batcher_.init(device_)) {
+        path_batcher_.shutdown(device_);
+        glyph_batcher_.shutdown(device_);
+        quad_batcher_.shutdown(device_);
+        return false;
+    }
+
     initialized_ = true;
     return true;
 }
 
 void Renderer::shutdown() {
     if (initialized_) {
+        image_batcher_.shutdown(device_);
+        path_batcher_.shutdown(device_);
         quad_batcher_.shutdown(device_);
         glyph_batcher_.shutdown(device_);
         glyph_atlas_.clear();
@@ -64,7 +80,8 @@ void Renderer::shutdown() {
 }
 
 void Renderer::render_frame(core::NodeTree& tree, core::Size viewport_size,
-                            core::Color clear_color) {
+                            core::Color clear_color,
+                            overlay::OverlayManager* overlay_manager) {
     frame_arena_.reset();
 
     if (!tree.default_paint()) {
@@ -86,10 +103,20 @@ void Renderer::render_frame(core::NodeTree& tree, core::Size viewport_size,
     DisplayList dl(frame_arena_, viewport_rect);
     dl.set_glyph_atlas(&glyph_atlas_);
 
+    if (overlay_manager) {
+        overlay_manager->layout_overlays(tree, viewport_size);
+    }
+
     tree.paint(&dl);
+
+    if (overlay_manager) {
+        overlay_manager->paint_overlays(tree, dl, viewport_size);
+    }
 
     quad_batcher_.begin_batch();
     glyph_batcher_.begin_batch();
+    path_batcher_.begin_batch();
+    image_batcher_.begin_batch();
 
     for (const auto& cmd : dl.commands()) {
         switch (cmd.type) {
@@ -97,11 +124,23 @@ void Renderer::render_frame(core::NodeTree& tree, core::Size viewport_size,
             if (glyph_batcher_.has_pending()) {
                 glyph_batcher_.flush(device_);
             }
+            if (path_batcher_.index_count() > 0) {
+                path_batcher_.flush(device_);
+            }
+            if (image_batcher_.has_pending()) {
+                image_batcher_.flush(device_);
+            }
             quad_batcher_.add_quad(cmd.quad, cmd.clip_rect);
             break;
         case CommandType::Shadow:
             if (glyph_batcher_.has_pending()) {
                 glyph_batcher_.flush(device_);
+            }
+            if (path_batcher_.index_count() > 0) {
+                path_batcher_.flush(device_);
+            }
+            if (image_batcher_.has_pending()) {
+                image_batcher_.flush(device_);
             }
             quad_batcher_.add_shadow(cmd.shadow, cmd.clip_rect);
             break;
@@ -109,8 +148,38 @@ void Renderer::render_frame(core::NodeTree& tree, core::Size viewport_size,
             if (quad_batcher_.instance_count() > 0) {
                 quad_batcher_.flush(device_);
             }
+            if (path_batcher_.index_count() > 0) {
+                path_batcher_.flush(device_);
+            }
+            if (image_batcher_.has_pending()) {
+                image_batcher_.flush(device_);
+            }
             glyph_batcher_.add_run(cmd.glyph_run.atlas_texture, cmd.glyph_run.glyphs, cmd.clip_rect,
                                    device_);
+            break;
+        case CommandType::PathMesh:
+            if (quad_batcher_.instance_count() > 0) {
+                quad_batcher_.flush(device_);
+            }
+            if (glyph_batcher_.has_pending()) {
+                glyph_batcher_.flush(device_);
+            }
+            if (image_batcher_.has_pending()) {
+                image_batcher_.flush(device_);
+            }
+            path_batcher_.add_mesh(cmd.path_mesh.vertices, cmd.path_mesh.indices, cmd.clip_rect);
+            break;
+        case CommandType::Image:
+            if (quad_batcher_.instance_count() > 0) {
+                quad_batcher_.flush(device_);
+            }
+            if (glyph_batcher_.has_pending()) {
+                glyph_batcher_.flush(device_);
+            }
+            if (path_batcher_.index_count() > 0) {
+                path_batcher_.flush(device_);
+            }
+            image_batcher_.add_image(cmd.image, cmd.clip_rect, device_);
             break;
         }
     }
@@ -120,6 +189,12 @@ void Renderer::render_frame(core::NodeTree& tree, core::Size viewport_size,
     }
     if (glyph_batcher_.has_pending()) {
         glyph_batcher_.flush(device_);
+    }
+    if (path_batcher_.index_count() > 0) {
+        path_batcher_.flush(device_);
+    }
+    if (image_batcher_.has_pending()) {
+        image_batcher_.flush(device_);
     }
 
     device_.end_frame();

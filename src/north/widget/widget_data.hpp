@@ -4,7 +4,10 @@
 #include "north/animation/curve.hpp"
 #include "north/core/signal.hpp"
 #include "north/core/types.hpp"
+#include "north/image/image_types.hpp"
 #include "north/layout/flex.hpp"
+#include "north/render/path.hpp"
+#include "north/render/path_tessellator.hpp"
 #include "north/style/style.hpp"
 #include "north/style/theme.hpp"
 #include "north/text/font.hpp"
@@ -26,12 +29,17 @@ enum class WidgetKind : uint8_t {
     Checkbox,
     Switch,
     Slider,
-    RadioButton
+    RadioButton,
+    Icon,
+    Image
 };
 
 enum class ButtonState : uint8_t { Normal, Hovered, Pressed };
 
 using ClickCallbackFn = void (*)(void* user_data);
+
+struct BoxData;
+using BoxThemeFn = void (*)(const style::Theme& theme, BoxData& data);
 
 struct BoxData {
     WidgetKind kind{WidgetKind::Box};
@@ -45,7 +53,32 @@ struct BoxData {
     float flex_shrink{1.0f};
     float flex_basis{-1.0f};
     bool is_flex{false};
+    core::Signal<style::Theme>* theme_signal{nullptr};
+    BoxThemeFn on_theme{nullptr};
+    core::NodeTree* tree{nullptr};
+    core::Handle<core::Node> node_handle{};
+    animation::AnimatedValue<core::Color> animated_bg;
+    animation::AnimatedValue<core::Color> animated_border;
+
+    BoxData() = default;
+    BoxData(BoxData&&) noexcept = default;
+    BoxData& operator=(BoxData&&) noexcept = default;
+    ~BoxData() {
+        if (theme_signal) {
+            theme_signal->unbind_dirty(this);
+        }
+    }
+    BoxData(const BoxData& other)
+        : kind(other.kind), style(other.style), padding(other.padding), margin(other.margin),
+          flex_style(other.flex_style), width(other.width), height(other.height),
+          flex_grow(other.flex_grow), flex_shrink(other.flex_shrink), flex_basis(other.flex_basis),
+          is_flex(other.is_flex), theme_signal(other.theme_signal), on_theme(other.on_theme),
+          tree(other.tree), node_handle(other.node_handle) {}
+
+    void apply_theme(const style::Theme& theme);
 };
+
+using TextThemeFn = core::Color (*)(const style::ColorTokens& tokens);
 
 struct TextData {
     WidgetKind kind{WidgetKind::Text};
@@ -56,6 +89,27 @@ struct TextData {
     text::TextAlign align{text::TextAlign::Left};
     float max_width{0.0f};
     std::unique_ptr<text::Paragraph> paragraph;
+    core::Signal<style::Theme>* theme_signal{nullptr};
+    TextThemeFn color_token_fn{nullptr};
+    core::NodeTree* tree{nullptr};
+    core::Handle<core::Node> node_handle{};
+    animation::AnimatedValue<core::Color> animated_color;
+
+    TextData() = default;
+    TextData(TextData&&) noexcept = default;
+    TextData& operator=(TextData&&) noexcept = default;
+    ~TextData() {
+        if (theme_signal) {
+            theme_signal->unbind_dirty(this);
+        }
+    }
+    TextData(const TextData& other)
+        : kind(other.kind), text_string(other.text_string), font(other.font),
+          font_size(other.font_size), color(other.color), align(other.align),
+          max_width(other.max_width), theme_signal(other.theme_signal),
+          color_token_fn(other.color_token_fn), tree(other.tree), node_handle(other.node_handle) {}
+
+    void apply_theme(const style::Theme& theme);
 };
 
 struct ButtonData {
@@ -76,29 +130,27 @@ struct ButtonData {
     core::Handle<core::Node> node_handle{};
     animation::AnimatedValue<core::Color> animated_bg;
     animation::AnimatedValue<core::Color> animated_border;
+    animation::AnimatedValue<core::Color> animated_text;
+    core::Signal<style::Theme>* theme_signal{nullptr};
 
     ButtonData() = default;
     ButtonData(ButtonData&&) noexcept = default;
     ButtonData& operator=(ButtonData&&) noexcept = default;
+    ~ButtonData() {
+        if (theme_signal) {
+            theme_signal->unbind_dirty(this);
+        }
+    }
     ButtonData(const ButtonData& other)
         : kind(other.kind), state(other.state.get()), on_click(other.on_click),
           click_user_data(other.click_user_data), normal_style(other.normal_style),
           hover_style(other.hover_style), pressed_style(other.pressed_style),
           text_color(other.text_color), label(other.label), font(other.font),
           font_size(other.font_size), padding(other.padding), tree(other.tree),
-          node_handle(other.node_handle) {}
+          node_handle(other.node_handle), theme_signal(other.theme_signal) {}
 
-    void update_animation_targets() {
-        ButtonState st = state.get();
-        const style::BoxStyle& target_style =
-            (st == ButtonState::Pressed)
-                ? pressed_style
-                : (st == ButtonState::Hovered ? hover_style : normal_style);
-
-        animated_bg.tween_to(target_style.background, 0.12f, animation::CubicBezier::ease_out());
-        animated_border.tween_to(target_style.border_color, 0.12f,
-                                 animation::CubicBezier::ease_out());
-    }
+    void apply_theme(const style::Theme& theme);
+    void update_animation_targets(float duration = 0.12f);
 };
 
 struct TextInputData {
@@ -127,6 +179,35 @@ struct TextInputData {
     void* submit_user_data{nullptr};
     std::unique_ptr<text::Paragraph> paragraph;
     std::unique_ptr<text::Paragraph> placeholder_paragraph;
+    core::Signal<style::Theme>* theme_signal{nullptr};
+    core::NodeTree* tree{nullptr};
+    core::Handle<core::Node> node_handle{};
+    animation::AnimatedValue<core::Color> animated_bg;
+    animation::AnimatedValue<core::Color> animated_border;
+    animation::AnimatedValue<core::Color> animated_text;
+
+    TextInputData() = default;
+    TextInputData(TextInputData&&) noexcept = default;
+    TextInputData& operator=(TextInputData&&) noexcept = default;
+    ~TextInputData() {
+        if (theme_signal) {
+            theme_signal->unbind_dirty(this);
+        }
+    }
+    TextInputData(const TextInputData& other)
+        : kind(other.kind), buffer(other.buffer), placeholder(other.placeholder),
+          composition_text(other.composition_text), composition_cursor(other.composition_cursor),
+          font(other.font), font_size(other.font_size), normal_style(other.normal_style),
+          focus_style(other.focus_style), text_color(other.text_color),
+          placeholder_color(other.placeholder_color), selection_color(other.selection_color),
+          cursor_color(other.cursor_color), padding(other.padding), width(other.width),
+          height(other.height), is_focused(other.is_focused), cursor_visible(other.cursor_visible),
+          scroll_offset(other.scroll_offset), on_change(other.on_change),
+          change_user_data(other.change_user_data), on_submit(other.on_submit),
+          submit_user_data(other.submit_user_data), theme_signal(other.theme_signal),
+          tree(other.tree), node_handle(other.node_handle) {}
+
+    void apply_theme(const style::Theme& theme);
 };
 
 enum class ScrollDirection : uint8_t { Vertical, Horizontal, Both };
@@ -178,10 +259,17 @@ struct ScrollAreaData {
     animation::AnimatedValue<core::Point> animated_scroll;
     animation::AnimatedValue<float> animated_v_thickness;
     animation::AnimatedValue<float> animated_h_thickness;
+    animation::AnimatedValue<core::Color> animated_thumb_color;
+    core::Signal<style::Theme>* theme_signal{nullptr};
 
     ScrollAreaData() = default;
     ScrollAreaData(ScrollAreaData&&) noexcept = default;
     ScrollAreaData& operator=(ScrollAreaData&&) noexcept = default;
+    ~ScrollAreaData() {
+        if (theme_signal) {
+            theme_signal->unbind_dirty(this);
+        }
+    }
     ScrollAreaData(const ScrollAreaData& other)
         : kind(other.kind), direction(other.direction), scroll_offset(other.scroll_offset),
           target_scroll(other.target_scroll), max_scroll(other.max_scroll),
@@ -196,7 +284,9 @@ struct ScrollAreaData {
           drag_start_pointer_x(other.drag_start_pointer_x),
           drag_start_scroll_x(other.drag_start_scroll_x), on_scroll(other.on_scroll),
           scroll_user_data(other.scroll_user_data), tree(other.tree),
-          node_handle(other.node_handle) {}
+          node_handle(other.node_handle), theme_signal(other.theme_signal) {}
+
+    void apply_theme(const style::Theme& theme);
 };
 
 using ItemBuilderFn = core::Handle<core::Node> (*)(core::NodeTree& tree, size_t index,
@@ -217,6 +307,7 @@ struct VirtualListData {
     core::Size viewport_size{0.0f, 0.0f};
     size_t first_visible_idx{0};
     size_t last_visible_idx{0};
+    bool window_initialized{false};
     ScrollbarStyle scrollbar_style{};
     bool smooth_scroll{false};
     bool is_hovered{false};
@@ -228,10 +319,17 @@ struct VirtualListData {
     core::Handle<core::Node> node_handle{};
     animation::AnimatedValue<float> animated_scroll_y;
     animation::AnimatedValue<float> animated_thickness;
+    animation::AnimatedValue<core::Color> animated_thumb_color;
+    core::Signal<style::Theme>* theme_signal{nullptr};
 
     VirtualListData() = default;
     VirtualListData(VirtualListData&&) noexcept = default;
     VirtualListData& operator=(VirtualListData&&) noexcept = default;
+    ~VirtualListData() {
+        if (theme_signal) {
+            theme_signal->unbind_dirty(this);
+        }
+    }
     VirtualListData(const VirtualListData& other)
         : kind(other.kind), item_count(other.item_count),
           fixed_item_extent(other.fixed_item_extent), item_extent_fn(other.item_extent_fn),
@@ -239,12 +337,15 @@ struct VirtualListData {
           builder_user_data(other.builder_user_data), scroll_offset(other.scroll_offset),
           target_scroll_y(other.target_scroll_y), max_scroll(other.max_scroll),
           viewport_size(other.viewport_size), first_visible_idx(other.first_visible_idx),
-          last_visible_idx(other.last_visible_idx), scrollbar_style(other.scrollbar_style),
+          last_visible_idx(other.last_visible_idx), window_initialized(other.window_initialized),
+          scrollbar_style(other.scrollbar_style),
           smooth_scroll(other.smooth_scroll), is_hovered(other.is_hovered),
           is_thumb_hovered(other.is_thumb_hovered), is_thumb_dragging(other.is_thumb_dragging),
           drag_start_pointer_y(other.drag_start_pointer_y),
           drag_start_scroll_y(other.drag_start_scroll_y), tree(other.tree),
-          node_handle(other.node_handle) {}
+          node_handle(other.node_handle), theme_signal(other.theme_signal) {}
+
+    void apply_theme(const style::Theme& theme);
 };
 
 struct CheckboxData {
@@ -269,6 +370,7 @@ struct CheckboxData {
     core::NodeTree* tree{nullptr};
     core::Handle<core::Node> node_handle{};
     std::unique_ptr<text::Paragraph> paragraph;
+    core::Signal<style::Theme>* theme_signal{nullptr};
 
     CheckboxData() = default;
     CheckboxData(CheckboxData&&) noexcept = default;
@@ -276,6 +378,9 @@ struct CheckboxData {
     ~CheckboxData() {
         if (bound_signal) {
             bound_signal->unbind_dirty(this);
+        }
+        if (theme_signal) {
+            theme_signal->unbind_dirty(this);
         }
     }
     CheckboxData(const CheckboxData& other)
@@ -285,10 +390,11 @@ struct CheckboxData {
           check_color(other.check_color), focus_ring_color(other.focus_ring_color),
           is_hovered(other.is_hovered), is_focused(other.is_focused), on_change(other.on_change),
           change_user_data(other.change_user_data), tree(other.tree),
-          node_handle(other.node_handle) {}
+          node_handle(other.node_handle), theme_signal(other.theme_signal) {}
 
     void toggle();
     void update_targets();
+    void apply_theme(const style::Theme& theme);
 };
 
 struct SwitchData {
@@ -313,6 +419,7 @@ struct SwitchData {
     core::NodeTree* tree{nullptr};
     core::Handle<core::Node> node_handle{};
     std::unique_ptr<text::Paragraph> paragraph;
+    core::Signal<style::Theme>* theme_signal{nullptr};
 
     SwitchData() = default;
     SwitchData(SwitchData&&) noexcept = default;
@@ -320,6 +427,9 @@ struct SwitchData {
     ~SwitchData() {
         if (bound_signal) {
             bound_signal->unbind_dirty(this);
+        }
+        if (theme_signal) {
+            theme_signal->unbind_dirty(this);
         }
     }
     SwitchData(const SwitchData& other)
@@ -330,10 +440,11 @@ struct SwitchData {
           font_size(other.font_size), text_color(other.text_color), is_hovered(other.is_hovered),
           is_focused(other.is_focused), on_change(other.on_change),
           change_user_data(other.change_user_data), tree(other.tree),
-          node_handle(other.node_handle) {}
+          node_handle(other.node_handle), theme_signal(other.theme_signal) {}
 
     void toggle();
     void update_targets();
+    void apply_theme(const style::Theme& theme);
 };
 
 struct SliderData {
@@ -358,6 +469,10 @@ struct SliderData {
     void* change_user_data{nullptr};
     core::NodeTree* tree{nullptr};
     core::Handle<core::Node> node_handle{};
+    core::Signal<style::Theme>* theme_signal{nullptr};
+    animation::AnimatedValue<core::Color> animated_track_inactive;
+    animation::AnimatedValue<core::Color> animated_track_active;
+    animation::AnimatedValue<core::Color> animated_thumb;
 
     SliderData() = default;
     SliderData(SliderData&&) noexcept = default;
@@ -365,6 +480,9 @@ struct SliderData {
     ~SliderData() {
         if (bound_signal) {
             bound_signal->unbind_dirty(this);
+        }
+        if (theme_signal) {
+            theme_signal->unbind_dirty(this);
         }
     }
     SliderData(const SliderData& other)
@@ -377,10 +495,11 @@ struct SliderData {
           is_dragging(other.is_dragging), is_hovered(other.is_hovered),
           is_focused(other.is_focused), on_change(other.on_change),
           change_user_data(other.change_user_data), tree(other.tree),
-          node_handle(other.node_handle) {}
+          node_handle(other.node_handle), theme_signal(other.theme_signal) {}
 
     void set_value(float new_val);
     void seek_from_pointer(float local_x);
+    void apply_theme(const style::Theme& theme);
 };
 
 struct RadioButtonData {
@@ -407,6 +526,7 @@ struct RadioButtonData {
     core::NodeTree* tree{nullptr};
     core::Handle<core::Node> node_handle{};
     std::unique_ptr<text::Paragraph> paragraph;
+    core::Signal<style::Theme>* theme_signal{nullptr};
 
     RadioButtonData() = default;
     RadioButtonData(RadioButtonData&&) noexcept = default;
@@ -417,6 +537,9 @@ struct RadioButtonData {
         }
         if (bound_signal) {
             bound_signal->unbind_dirty(this);
+        }
+        if (theme_signal) {
+            theme_signal->unbind_dirty(this);
         }
     }
     RadioButtonData(const RadioButtonData& other)
@@ -429,10 +552,85 @@ struct RadioButtonData {
           font_size(other.font_size), text_color(other.text_color), is_hovered(other.is_hovered),
           is_focused(other.is_focused), on_select(other.on_select),
           select_user_data(other.select_user_data), tree(other.tree),
-          node_handle(other.node_handle) {}
+          node_handle(other.node_handle), theme_signal(other.theme_signal) {}
 
     void select();
     void update_targets();
+    void apply_theme(const style::Theme& theme);
+};
+
+struct IconData;
+using IconThemeFn = void (*)(const style::Theme& theme, IconData& data);
+
+struct IconData {
+    WidgetKind kind{WidgetKind::Icon};
+    render::Path path{};
+    render::PathMesh cached_mesh{};
+    core::Size size{24.0f, 24.0f};
+    core::Color color{1.0f, 1.0f, 1.0f, 1.0f};
+    bool is_stroke{false};
+    render::StrokeStyle stroke_style{};
+    core::Signal<style::Theme>* theme_signal{nullptr};
+    IconThemeFn on_theme{nullptr};
+    core::NodeTree* tree{nullptr};
+    core::Handle<core::Node> node_handle{};
+    animation::AnimatedValue<core::Color> animated_color;
+
+    IconData() = default;
+    IconData(IconData&&) noexcept = default;
+    IconData& operator=(IconData&&) noexcept = default;
+    ~IconData() {
+        if (theme_signal) {
+            theme_signal->unbind_dirty(this);
+        }
+    }
+    IconData(const IconData& other)
+        : kind(other.kind), path(other.path), cached_mesh(other.cached_mesh),
+          size(other.size), color(other.color), is_stroke(other.is_stroke),
+          stroke_style(other.stroke_style), theme_signal(other.theme_signal),
+          on_theme(other.on_theme), tree(other.tree), node_handle(other.node_handle) {}
+
+    void apply_theme(const style::Theme& theme);
+};
+
+struct ImageData;
+using ImageThemeFn = void (*)(const style::Theme& theme, ImageData& data);
+
+struct ImageData {
+    WidgetKind kind{WidgetKind::Image};
+    gpu::TextureId texture{gpu::kInvalidTexture};
+    core::Size natural_size{0.0f, 0.0f};
+    core::Size explicit_size{-1.0f, -1.0f};
+    float aspect_ratio{-1.0f};
+    image::ContentScale content_scale{image::ContentScale::Fit};
+    image::ImageAlignment alignment{image::ImageAlignment::Center};
+    core::CornerRadii corner_radii{};
+    core::Color tint{1.0f, 1.0f, 1.0f, 1.0f};
+    core::Color border_color{0.0f, 0.0f, 0.0f, 0.0f};
+    core::Edges border_width{};
+    core::Signal<style::Theme>* theme_signal{nullptr};
+    ImageThemeFn on_theme{nullptr};
+    core::NodeTree* tree{nullptr};
+    core::Handle<core::Node> node_handle{};
+    animation::AnimatedValue<core::Color> animated_tint;
+
+    ImageData() = default;
+    ImageData(ImageData&&) noexcept = default;
+    ImageData& operator=(ImageData&&) noexcept = default;
+    ~ImageData() {
+        if (theme_signal) {
+            theme_signal->unbind_dirty(this);
+        }
+    }
+    ImageData(const ImageData& other)
+        : kind(other.kind), texture(other.texture), natural_size(other.natural_size),
+          explicit_size(other.explicit_size), aspect_ratio(other.aspect_ratio),
+          content_scale(other.content_scale), alignment(other.alignment),
+          corner_radii(other.corner_radii), tint(other.tint), border_color(other.border_color),
+          border_width(other.border_width), theme_signal(other.theme_signal),
+          on_theme(other.on_theme), tree(other.tree), node_handle(other.node_handle) {}
+
+    void apply_theme(const style::Theme& theme);
 };
 
 } // namespace north::widget

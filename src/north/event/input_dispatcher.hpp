@@ -7,6 +7,10 @@ namespace north::platform::win32 {
 class Win32Window;
 }
 
+namespace north::overlay {
+class OverlayManager;
+}
+
 namespace north::event {
 
 class InputDispatcher : public platform::IWindowListener {
@@ -29,6 +33,10 @@ public:
     }
 
     void set_window(platform::win32::Win32Window* window) noexcept { window_ = window; }
+    void set_overlay_manager(overlay::OverlayManager* mgr) noexcept { overlay_manager_ = mgr; }
+    [[nodiscard]] overlay::OverlayManager* overlay_manager() const noexcept {
+        return overlay_manager_;
+    }
 
     void on_pointer(const platform::PointerEvent& event) override;
     void on_scroll(float delta_x, float delta_y, core::Point pointer_pos) override;
@@ -62,6 +70,7 @@ private:
     float scrollbar_drag_start_ptr_{0.0f};
     float scrollbar_drag_start_scroll_{0.0f};
     platform::win32::Win32Window* window_{nullptr};
+    overlay::OverlayManager* overlay_manager_{nullptr};
     platform::IWindowListener* fallback_listener_{nullptr};
 };
 

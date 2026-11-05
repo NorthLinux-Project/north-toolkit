@@ -17,6 +17,7 @@ public:
     TextBuilder& font(std::shared_ptr<text::Font> font);
     TextBuilder& font_size(float size);
     TextBuilder& color(core::Color color);
+    TextBuilder& theme_signal(core::Signal<style::Theme>* sig, TextThemeFn fn);
     TextBuilder& align(text::TextAlign align);
     TextBuilder& max_width(float max_w);
 

@@ -124,6 +124,14 @@ void NodeTree::layout(const layout::BoxConstraints& root_constraints) {
     }
 }
 
+Size NodeTree::layout_subtree(Node::HandleType handle, const layout::BoxConstraints& constraints) {
+    if (handle.is_valid()) {
+        mark_dirty(handle, kLayout);
+        return layout_recursive(handle, constraints);
+    }
+    return {0.0f, 0.0f};
+}
+
 Size NodeTree::layout_recursive(Node::HandleType handle,
                                 const layout::BoxConstraints& constraints) {
     Node* node = pool_.get(handle);
@@ -152,6 +160,12 @@ Size NodeTree::layout_recursive(Node::HandleType handle,
 void NodeTree::paint(void* stream) {
     if (root_.is_valid()) {
         paint_recursive(root_, {0.0f, 0.0f}, stream);
+    }
+}
+
+void NodeTree::paint_subtree(Node::HandleType handle, Point origin, void* stream) {
+    if (handle.is_valid()) {
+        paint_recursive(handle, origin, stream);
     }
 }
 

@@ -32,6 +32,43 @@ float Theme::contrast_ratio(core::Color a, core::Color b) noexcept {
     return (l1 + 0.05f) / (l2 + 0.05f);
 }
 
+Theme Theme::from_seed(core::Color seed, bool dark, float duration) noexcept {
+    auto palettes = color::make_m3_palettes(seed);
+    return from_seed(seed, dark, palettes, duration);
+}
+
+Theme Theme::from_seed(core::Color, bool dark, const color::M3Palettes& palettes, float duration) noexcept {
+    ColorTokens tokens = dark ? color::make_dark_tokens(palettes) : color::make_light_tokens(palettes);
+    return Theme(tokens, palettes, duration);
+}
+
+Theme Theme::from_hct(float hue, float chroma, bool dark, float duration) noexcept {
+    auto palettes = color::make_m3_palettes(hue, chroma);
+    ColorTokens tokens = dark ? color::make_dark_tokens(palettes) : color::make_light_tokens(palettes);
+    return Theme(tokens, palettes, duration);
+}
+
+core::Color Theme::surface_container() const noexcept {
+    if (palettes_.has_value()) {
+        return is_dark() ? palettes_->neutral[14.0f] : palettes_->neutral[94.0f];
+    }
+    return is_dark() ? core::Color::from_rgba8(30, 32, 38) : core::Color::from_rgba8(244, 245, 249);
+}
+
+core::Color Theme::surface_container_high() const noexcept {
+    if (palettes_.has_value()) {
+        return is_dark() ? palettes_->neutral[17.0f] : palettes_->neutral[92.0f];
+    }
+    return is_dark() ? core::Color::from_rgba8(36, 39, 45) : core::Color::from_rgba8(238, 240, 244);
+}
+
+core::Color Theme::surface_container_highest() const noexcept {
+    if (palettes_.has_value()) {
+        return is_dark() ? palettes_->neutral[22.0f] : palettes_->neutral[90.0f];
+    }
+    return is_dark() ? core::Color::from_rgba8(44, 47, 54) : core::Color::from_rgba8(230, 233, 238);
+}
+
 const Theme& Theme::dark() noexcept {
     static const Theme instance(
         ColorTokens{.primary = core::Color::from_rgba8(56, 139, 253),

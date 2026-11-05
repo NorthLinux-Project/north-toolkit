@@ -44,6 +44,27 @@ void SliderData::seek_from_pointer(float local_x) {
     }
 }
 
+void SliderData::apply_theme(const style::Theme& theme) {
+    const auto& c = theme.colors();
+    track_inactive_color = c.surface_variant;
+    track_active_color = c.primary;
+    thumb_color = core::Color{1.0f, 1.0f, 1.0f, 1.0f};
+    focus_ring_color = c.primary;
+    float duration = theme.transition_duration();
+    if (duration <= 0.0f) {
+        animated_track_inactive.set_immediate(track_inactive_color);
+        animated_track_active.set_immediate(track_active_color);
+        animated_thumb.set_immediate(thumb_color);
+    } else {
+        animated_track_inactive.tween_to(track_inactive_color, duration, animation::CubicBezier::ease_out());
+        animated_track_active.tween_to(track_active_color, duration, animation::CubicBezier::ease_out());
+        animated_thumb.tween_to(thumb_color, duration, animation::CubicBezier::ease_out());
+    }
+    if (tree && node_handle.is_valid()) {
+        tree->mark_dirty(node_handle, core::kPaint);
+    }
+}
+
 namespace {
 
 core::Size slider_layout_fn(core::NodeTree&, core::Handle<core::Node>,
@@ -87,13 +108,13 @@ void slider_paint_fn(core::NodeTree& tree, core::Handle<core::Node> handle, core
 
     // Inactive track
     dl->push_quad(core::Rect{origin.x, track_y, w, track_h}, core::CornerRadii::uniform(2.0f),
-                  data->track_inactive_color);
+                  data->animated_track_inactive.get());
 
     // Active track fill
     float active_w = (std::max)(0.0f, thumb_center_x - origin.x);
     if (active_w > 0.0f) {
         dl->push_quad(core::Rect{origin.x, track_y, active_w, track_h},
-                      core::CornerRadii::uniform(2.0f), data->track_active_color);
+                      core::CornerRadii::uniform(2.0f), data->animated_track_active.get());
     }
 
     // Focus ring around thumb
@@ -114,7 +135,7 @@ void slider_paint_fn(core::NodeTree& tree, core::Handle<core::Node> handle, core
     // Thumb quad
     dl->push_quad(core::Rect{thumb_center_x - thumb_r, origin.y + h * 0.5f - thumb_r,
                              thumb_r * 2.0f, thumb_r * 2.0f},
-                  core::CornerRadii::uniform(thumb_r), data->thumb_color);
+                  core::CornerRadii::uniform(thumb_r), data->animated_thumb.get());
 }
 
 bool slider_hit_test_fn(core::NodeTree& tree, core::Handle<core::Node> handle,
@@ -172,6 +193,14 @@ SliderBuilder& SliderBuilder::theme(const style::Theme& theme) {
     return *this;
 }
 
+SliderBuilder& SliderBuilder::theme_signal(core::Signal<style::Theme>* sig) {
+    data_.theme_signal = sig;
+    if (sig) {
+        theme(sig->get());
+    }
+    return *this;
+}
+
 SliderBuilder& SliderBuilder::on_change(void (*fn)(float, void*), void* user_data) {
     data_.on_change = fn;
     data_.change_user_data = user_data;
@@ -188,8 +217,38 @@ core::Handle<core::Node> SliderBuilder::build() {
     heap_data->node_handle = handle;
     heap_data->tree = &tree_;
     heap_data->thumb_radius.set_immediate(8.0f);
+    heap_data->animated_track_inactive.set_immediate(heap_data->track_inactive_color);
+    heap_data->animated_track_active.set_immediate(heap_data->track_active_color);
+    heap_data->animated_thumb.set_immediate(heap_data->thumb_color);
 
     heap_data->thumb_radius.bind_dirty(
+        [](void* ctx, uint32_t flags) {
+            auto* sl = static_cast<SliderData*>(ctx);
+            if (sl->tree && sl->node_handle.is_valid()) {
+                sl->tree->mark_dirty(sl->node_handle, flags);
+            }
+        },
+        heap_data, core::kPaint);
+
+    heap_data->animated_track_inactive.bind_dirty(
+        [](void* ctx, uint32_t flags) {
+            auto* sl = static_cast<SliderData*>(ctx);
+            if (sl->tree && sl->node_handle.is_valid()) {
+                sl->tree->mark_dirty(sl->node_handle, flags);
+            }
+        },
+        heap_data, core::kPaint);
+
+    heap_data->animated_track_active.bind_dirty(
+        [](void* ctx, uint32_t flags) {
+            auto* sl = static_cast<SliderData*>(ctx);
+            if (sl->tree && sl->node_handle.is_valid()) {
+                sl->tree->mark_dirty(sl->node_handle, flags);
+            }
+        },
+        heap_data, core::kPaint);
+
+    heap_data->animated_thumb.bind_dirty(
         [](void* ctx, uint32_t flags) {
             auto* sl = static_cast<SliderData*>(ctx);
             if (sl->tree && sl->node_handle.is_valid()) {
@@ -210,6 +269,17 @@ core::Handle<core::Node> SliderBuilder::build() {
                 }
             },
             heap_data);
+    }
+
+    if (heap_data->theme_signal) {
+        heap_data->theme_signal->bind_dirty(
+            [](void* ctx, uint32_t) {
+                auto* sl = static_cast<SliderData*>(ctx);
+                if (sl && sl->theme_signal) {
+                    sl->apply_theme(sl->theme_signal->get());
+                }
+            },
+            heap_data, core::kPaint);
     }
 
     node->user_data = heap_data;

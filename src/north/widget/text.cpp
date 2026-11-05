@@ -42,7 +42,8 @@ void text_paint_fn(core::NodeTree&, core::Handle<core::Node>, core::Point origin
     if (!data || !data->paragraph || !dl->glyph_atlas())
         return;
 
-    data->paragraph->paint(*dl, *dl->glyph_atlas(), origin);
+    core::Color c = data->animated_color.get();
+    data->paragraph->paint(*dl, *dl->glyph_atlas(), origin, c);
 }
 
 void text_destroy_fn(void* user_data) {
@@ -50,6 +51,21 @@ void text_destroy_fn(void* user_data) {
 }
 
 } // namespace
+
+void TextData::apply_theme(const style::Theme& theme) {
+    if (color_token_fn) {
+        color = color_token_fn(theme.colors());
+    }
+    float duration = theme.transition_duration();
+    if (duration <= 0.0f) {
+        animated_color.set_immediate(color);
+    } else {
+        animated_color.tween_to(color, duration, animation::CubicBezier::ease_out());
+    }
+    if (tree && node_handle.is_valid()) {
+        tree->mark_dirty(node_handle, core::kPaint);
+    }
+}
 
 TextBuilder::TextBuilder(core::NodeTree& tree, std::string_view text) : tree_(tree) {
     data_.text_string = std::string(text);
@@ -67,6 +83,15 @@ TextBuilder& TextBuilder::font_size(float size) {
 
 TextBuilder& TextBuilder::color(core::Color color) {
     data_.color = color;
+    return *this;
+}
+
+TextBuilder& TextBuilder::theme_signal(core::Signal<style::Theme>* sig, TextThemeFn fn) {
+    data_.theme_signal = sig;
+    data_.color_token_fn = fn;
+    if (sig && fn) {
+        data_.color = fn(sig->get().colors());
+    }
     return *this;
 }
 
@@ -92,6 +117,30 @@ core::Handle<core::Node> TextBuilder::build() {
     }
 
     auto* heap_data = new TextData(std::move(data_));
+    heap_data->tree = &tree_;
+    heap_data->node_handle = handle;
+    heap_data->animated_color.set_immediate(heap_data->color);
+
+    heap_data->animated_color.bind_dirty(
+        [](void* ctx, uint32_t flags) {
+            auto* txt = static_cast<TextData*>(ctx);
+            if (txt->tree && txt->node_handle.is_valid()) {
+                txt->tree->mark_dirty(txt->node_handle, flags);
+            }
+        },
+        heap_data, core::kPaint);
+
+    if (heap_data->theme_signal) {
+        heap_data->theme_signal->bind_dirty(
+            [](void* ctx, uint32_t) {
+                auto* txt = static_cast<TextData*>(ctx);
+                if (txt && txt->theme_signal) {
+                    txt->apply_theme(txt->theme_signal->get());
+                }
+            },
+            heap_data, core::kPaint);
+    }
+
     node->user_data = heap_data;
     node->layout_fn = &text_layout_fn;
     node->paint_fn = &text_paint_fn;

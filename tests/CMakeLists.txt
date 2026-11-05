@@ -30,6 +30,7 @@ set(UNIT_TEST_SOURCES
     unit/test_bidi_and_breaker.cpp
     unit/test_glyph_atlas.cpp
     unit/test_paragraph.cpp
+    unit/test_hct.cpp
     unit/test_theme.cpp
     unit/test_win32_window.cpp
     unit/test_win32_app.cpp
@@ -40,6 +41,9 @@ set(UNIT_TEST_SOURCES
     unit/test_virtual_list.cpp
     unit/test_animation.cpp
     unit/test_form_controls.cpp
+    unit/test_path.cpp
+    unit/test_overlay.cpp
+    unit/test_image.cpp
 )
 
 add_executable(unit_tests ${UNIT_TEST_SOURCES})

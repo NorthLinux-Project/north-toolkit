@@ -3,6 +3,7 @@
 #include "north/core/arena.hpp"
 #include "north/core/types.hpp"
 #include "north/gpu/types.hpp"
+#include "north/render/path.hpp"
 
 #include <array>
 #include <cstdint>
@@ -14,7 +15,7 @@ class GlyphAtlas;
 
 namespace north::render {
 
-enum class CommandType : uint8_t { Quad, Shadow, GlyphRun };
+enum class CommandType : uint8_t { Quad, Shadow, GlyphRun, PathMesh, Image };
 
 struct DrawQuadCmd {
     core::Rect bounds;
@@ -38,6 +39,21 @@ struct DrawGlyphRunCmd {
     std::span<const gpu::GlyphInstance> glyphs{};
 };
 
+struct DrawPathMeshCmd {
+    std::span<const gpu::PathVertex> vertices;
+    std::span<const uint16_t> indices;
+};
+
+struct DrawImageCmd {
+    gpu::TextureId texture{gpu::kInvalidTexture};
+    core::Rect bounds{};
+    core::Rect uv_rect{0.0f, 0.0f, 1.0f, 1.0f};
+    core::CornerRadii radii{};
+    core::Color tint{1.0f, 1.0f, 1.0f, 1.0f};
+    core::Color border_color{0.0f, 0.0f, 0.0f, 0.0f};
+    core::Edges border_width{};
+};
+
 struct DrawCommand {
     CommandType type{CommandType::Quad};
     core::Rect clip_rect{};
@@ -45,6 +61,8 @@ struct DrawCommand {
         DrawQuadCmd quad;
         DrawShadowCmd shadow;
         DrawGlyphRunCmd glyph_run;
+        DrawPathMeshCmd path_mesh;
+        DrawImageCmd image;
     };
 
     DrawCommand() noexcept : type(CommandType::Quad), clip_rect{}, quad{} {}
@@ -63,8 +81,24 @@ public:
                      float blur_radius, float spread = 0.0f,
                      core::Point offset = {0.0f, 0.0f}) noexcept;
 
+    void push_image(gpu::TextureId texture, core::Rect bounds,
+                    core::CornerRadii radii = {},
+                    core::Rect uv_rect = {0.0f, 0.0f, 1.0f, 1.0f},
+                    core::Color tint = {1.0f, 1.0f, 1.0f, 1.0f},
+                    core::Color border_color = {},
+                    core::Edges border_width = {}) noexcept;
+
     void push_glyph_run(gpu::TextureId atlas_texture,
                         std::span<const gpu::GlyphInstance> glyphs) noexcept;
+
+    void push_path_mesh(std::span<const gpu::PathVertex> vertices,
+                        std::span<const uint16_t> indices) noexcept;
+
+    void push_path_fill(const Path& path, core::Color color,
+                        FillRule rule = FillRule::NonZero) noexcept;
+
+    void push_path_stroke(const Path& path, core::Color color,
+                          const StrokeStyle& style) noexcept;
 
     [[nodiscard]] std::span<gpu::GlyphInstance> alloc_glyphs(size_t count) noexcept {
         return arena_.alloc_array<gpu::GlyphInstance>(count);

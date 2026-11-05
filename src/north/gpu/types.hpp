@@ -18,9 +18,11 @@ enum class TextureFormat : uint8_t { RGBA8, R8, BGRA8 };
 
 enum class BufferUsage : uint8_t { Vertex, Index, Constant };
 
+enum class IndexFormat : uint8_t { UInt16, UInt32 };
+
 enum class BlendMode : uint8_t { Opaque, PremultipliedAlpha, Alpha };
 
-enum class VertexLayout : uint8_t { Quad, Glyph };
+enum class VertexLayout : uint8_t { Quad, Glyph, Path, Image };
 
 struct TextureDesc {
     uint32_t width{0};
@@ -54,6 +56,24 @@ struct alignas(16) GlyphInstance {
     core::Rect uv_rect;
     core::Color color;
     core::Rect clip_rect;
+};
+
+struct alignas(16) ImageInstance {
+    core::Rect rect;             // 16 bytes: x, y, width, height
+    core::Rect uv_rect;          // 16 bytes: u0, v0, u1, v1
+    core::CornerRadii radii;     // 16 bytes: tl, tr, br, bl
+    core::Color tint_color;      // 16 bytes: r, g, b, a
+    core::Color border_color;    // 16 bytes: r, g, b, a
+    core::Edges border_width;    // 16 bytes: top, right, bottom, left
+    core::Rect clip_rect;        // 16 bytes: x, y, width, height
+};
+
+struct alignas(16) PathVertex {
+    core::Point position;    // 8 bytes (x, y)
+    float aa_coverage{1.0f}; // 4 bytes (1.0 = solid, 0.0 = boundary)
+    float pad{0.0f};         // 4 bytes
+    core::Color color;       // 16 bytes (r, g, b, a)
+    core::Rect clip_rect;    // 16 bytes (x, y, w, h)
 };
 
 struct alignas(16) ViewConstants {

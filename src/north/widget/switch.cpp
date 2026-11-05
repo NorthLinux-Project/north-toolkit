@@ -8,12 +8,13 @@
 namespace north::widget {
 
 void SwitchData::update_targets() {
+    float duration = track_color.is_animating() ? 0.05f : 0.12f;
     if (checked) {
         thumb_position.spring_to(1.0f, animation::SpringDesc::snappy());
-        track_color.tween_to(track_on_color, 0.12f, animation::CubicBezier::ease_out());
+        track_color.tween_to(track_on_color, duration, animation::CubicBezier::ease_out());
     } else {
         thumb_position.spring_to(0.0f, animation::SpringDesc::snappy());
-        track_color.tween_to(track_off_color, 0.12f, animation::CubicBezier::ease_out());
+        track_color.tween_to(track_off_color, duration, animation::CubicBezier::ease_out());
     }
 }
 
@@ -32,6 +33,27 @@ void SwitchData::toggle() {
         sig->set(new_state);
     } else {
         internal_signal.set(new_state);
+    }
+}
+
+void SwitchData::apply_theme(const style::Theme& theme) {
+    const auto& c = theme.colors();
+    text_color = c.on_surface;
+    track_off_color = c.surface_variant;
+    track_on_color = c.primary;
+    thumb_color = core::Color{1.0f, 1.0f, 1.0f, 1.0f};
+    focus_ring_color = c.primary;
+    if (paragraph) {
+        paragraph = nullptr;
+    }
+    float duration = theme.transition_duration();
+    if (duration <= 0.0f) {
+        track_color.set_immediate(checked ? track_on_color : track_off_color);
+    } else {
+        update_targets();
+    }
+    if (tree && node_handle.is_valid()) {
+        tree->mark_dirty(node_handle, core::kPaint);
     }
 }
 
@@ -176,6 +198,14 @@ SwitchBuilder& SwitchBuilder::theme(const style::Theme& theme) {
     return *this;
 }
 
+SwitchBuilder& SwitchBuilder::theme_signal(core::Signal<style::Theme>* sig) {
+    data_.theme_signal = sig;
+    if (sig) {
+        theme(sig->get());
+    }
+    return *this;
+}
+
 SwitchBuilder& SwitchBuilder::on_change(void (*fn)(bool, void*), void* user_data) {
     data_.on_change = fn;
     data_.change_user_data = user_data;
@@ -234,6 +264,17 @@ core::Handle<core::Node> SwitchBuilder::build() {
                 }
             },
             heap_data);
+    }
+
+    if (heap_data->theme_signal) {
+        heap_data->theme_signal->bind_dirty(
+            [](void* ctx, uint32_t) {
+                auto* sw = static_cast<SwitchData*>(ctx);
+                if (sw && sw->theme_signal) {
+                    sw->apply_theme(sw->theme_signal->get());
+                }
+            },
+            heap_data, core::kPaint);
     }
 
     node->user_data = heap_data;

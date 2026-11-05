@@ -8,15 +8,16 @@
 namespace north::widget {
 
 void CheckboxData::update_targets() {
+    float duration = animated_border.is_animating() ? 0.05f : 0.12f;
     if (checked) {
         check_progress.spring_to(1.0f, animation::SpringDesc::snappy());
-        animated_bg.tween_to(box_color, 0.12f, animation::CubicBezier::ease_out());
-        animated_border.tween_to(box_color, 0.12f, animation::CubicBezier::ease_out());
+        animated_bg.tween_to(box_color, duration, animation::CubicBezier::ease_out());
+        animated_border.tween_to(box_color, duration, animation::CubicBezier::ease_out());
     } else {
         check_progress.spring_to(0.0f, animation::SpringDesc::snappy());
-        animated_bg.tween_to(core::Color{0.0f, 0.0f, 0.0f, 0.0f}, 0.12f,
+        animated_bg.tween_to(core::Color{0.0f, 0.0f, 0.0f, 0.0f}, duration,
                              animation::CubicBezier::ease_out());
-        animated_border.tween_to(box_color, 0.12f, animation::CubicBezier::ease_out());
+        animated_border.tween_to(box_color, duration, animation::CubicBezier::ease_out());
     }
 }
 
@@ -35,6 +36,27 @@ void CheckboxData::toggle() {
         sig->set(new_state);
     } else {
         internal_signal.set(new_state);
+    }
+}
+
+void CheckboxData::apply_theme(const style::Theme& theme) {
+    const auto& c = theme.colors();
+    box_color = c.primary;
+    check_color = c.on_primary;
+    focus_ring_color = c.primary;
+    text_color = c.on_surface;
+    if (paragraph) {
+        paragraph = nullptr;
+    }
+    float duration = theme.transition_duration();
+    if (duration <= 0.0f) {
+        animated_bg.set_immediate(checked ? box_color : core::Color{0.0f, 0.0f, 0.0f, 0.0f});
+        animated_border.set_immediate(box_color);
+    } else {
+        update_targets();
+    }
+    if (tree && node_handle.is_valid()) {
+        tree->mark_dirty(node_handle, core::kPaint);
     }
 }
 
@@ -195,6 +217,14 @@ CheckboxBuilder& CheckboxBuilder::theme(const style::Theme& theme) {
     return *this;
 }
 
+CheckboxBuilder& CheckboxBuilder::theme_signal(core::Signal<style::Theme>* sig) {
+    data_.theme_signal = sig;
+    if (sig) {
+        theme(sig->get());
+    }
+    return *this;
+}
+
 CheckboxBuilder& CheckboxBuilder::on_change(void (*fn)(bool, void*), void* user_data) {
     data_.on_change = fn;
     data_.change_user_data = user_data;
@@ -263,6 +293,17 @@ core::Handle<core::Node> CheckboxBuilder::build() {
                 }
             },
             heap_data);
+    }
+
+    if (heap_data->theme_signal) {
+        heap_data->theme_signal->bind_dirty(
+            [](void* ctx, uint32_t) {
+                auto* cb = static_cast<CheckboxData*>(ctx);
+                if (cb && cb->theme_signal) {
+                    cb->apply_theme(cb->theme_signal->get());
+                }
+            },
+            heap_data, core::kPaint);
     }
 
     node->user_data = heap_data;

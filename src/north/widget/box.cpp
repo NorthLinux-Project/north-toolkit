@@ -92,10 +92,13 @@ void box_paint_fn(core::NodeTree& tree, core::Handle<core::Node> handle, core::P
                         s.shadow_offset);
     }
 
-    if (s.background.a > 0.0f ||
-        (s.border_color.a > 0.0f && (s.border_width.top > 0.0f || s.border_width.right > 0.0f ||
-                                     s.border_width.bottom > 0.0f || s.border_width.left > 0.0f))) {
-        dl->push_quad(bounds, s.corner_radii, s.background, s.border_color, s.border_width);
+    core::Color bg = data->animated_bg.get();
+    core::Color border = data->animated_border.get();
+
+    if (bg.a > 0.0f ||
+        (border.a > 0.0f && (s.border_width.top > 0.0f || s.border_width.right > 0.0f ||
+                             s.border_width.bottom > 0.0f || s.border_width.left > 0.0f))) {
+        dl->push_quad(bounds, s.corner_radii, bg, border, s.border_width);
     }
 }
 
@@ -104,6 +107,23 @@ void box_destroy_fn(void* user_data) {
 }
 
 } // namespace
+
+void BoxData::apply_theme(const style::Theme& theme) {
+    if (on_theme) {
+        on_theme(theme, *this);
+    }
+    float duration = theme.transition_duration();
+    if (duration <= 0.0f) {
+        animated_bg.set_immediate(style.background);
+        animated_border.set_immediate(style.border_color);
+    } else {
+        animated_bg.tween_to(style.background, duration, animation::CubicBezier::ease_out());
+        animated_border.tween_to(style.border_color, duration, animation::CubicBezier::ease_out());
+    }
+    if (tree && node_handle.is_valid()) {
+        tree->mark_dirty(node_handle, core::kPaint);
+    }
+}
 
 BoxBuilder::BoxBuilder(core::NodeTree& tree) : tree_(tree) {}
 
@@ -162,6 +182,15 @@ BoxBuilder& BoxBuilder::size(core::Size sz) {
     return *this;
 }
 
+BoxBuilder& BoxBuilder::theme_signal(core::Signal<style::Theme>* sig, BoxThemeFn on_theme) {
+    data_.theme_signal = sig;
+    data_.on_theme = on_theme;
+    if (sig && on_theme) {
+        on_theme(sig->get(), data_);
+    }
+    return *this;
+}
+
 BoxBuilder& BoxBuilder::flex_grow(float grow) {
     data_.flex_grow = grow;
     return *this;
@@ -215,6 +244,41 @@ core::Handle<core::Node> BoxBuilder::build() {
     }
 
     auto* heap_data = new BoxData(data_);
+    heap_data->tree = &tree_;
+    heap_data->node_handle = handle;
+
+    heap_data->animated_bg.set_immediate(heap_data->style.background);
+    heap_data->animated_border.set_immediate(heap_data->style.border_color);
+
+    heap_data->animated_bg.bind_dirty(
+        [](void* ctx, uint32_t flags) {
+            auto* box = static_cast<BoxData*>(ctx);
+            if (box->tree && box->node_handle.is_valid()) {
+                box->tree->mark_dirty(box->node_handle, flags);
+            }
+        },
+        heap_data, core::kPaint);
+
+    heap_data->animated_border.bind_dirty(
+        [](void* ctx, uint32_t flags) {
+            auto* box = static_cast<BoxData*>(ctx);
+            if (box->tree && box->node_handle.is_valid()) {
+                box->tree->mark_dirty(box->node_handle, flags);
+            }
+        },
+        heap_data, core::kPaint);
+
+    if (heap_data->theme_signal) {
+        heap_data->theme_signal->bind_dirty(
+            [](void* ctx, uint32_t) {
+                auto* box = static_cast<BoxData*>(ctx);
+                if (box && box->theme_signal) {
+                    box->apply_theme(box->theme_signal->get());
+                }
+            },
+            heap_data, core::kPaint);
+    }
+
     node->user_data = heap_data;
     node->layout_fn = &box_layout_fn;
     node->paint_fn = &box_paint_fn;

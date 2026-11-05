@@ -43,10 +43,15 @@ public:
     void set_viewport(float width, float height) override;
     void set_pipeline(PipelineId id) override;
     void set_instance_buffer(BufferId id, uint32_t stride) override;
+    void set_vertex_buffer(BufferId id, uint32_t stride, uint32_t offset = 0) override;
+    void set_index_buffer(BufferId id, IndexFormat format = IndexFormat::UInt16,
+                          uint32_t offset = 0) override;
     void set_constants(uint32_t slot, std::span<const uint8_t> data) override;
     void set_texture(uint32_t slot, TextureId id) override;
     void set_scissor(core::Rect rect) override;
     void draw_instanced(uint32_t vertex_count_per_instance, uint32_t instance_count) override;
+    void draw_indexed(uint32_t index_count, uint32_t start_index = 0,
+                      int32_t base_vertex = 0) override;
     void end_frame() override;
     void present() override;
     void resize_swapchain(uint32_t width, uint32_t height) override;

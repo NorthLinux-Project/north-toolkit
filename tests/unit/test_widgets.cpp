@@ -173,6 +173,30 @@ TEST_F(WidgetTestFixture, ButtonClickAndStateTransitions) {
     EXPECT_EQ(btn_data->state.get(), ButtonState::Normal);
 }
 
+TEST_F(WidgetTestFixture, ButtonCustomTextColor) {
+    core::NodeTree tree;
+
+    core::Color custom_color{1.0f, 1.0f, 1.0f, 1.0f};
+    auto btn_node = ButtonBuilder(tree, "Custom Text Color")
+                        .text_color(custom_color)
+                        .build();
+
+    auto* node = tree.get(btn_node);
+    ASSERT_NE(node, nullptr);
+
+    auto* btn_data = reinterpret_cast<ButtonData*>(node->user_data);
+    ASSERT_NE(btn_data, nullptr);
+    EXPECT_FLOAT_EQ(btn_data->text_color.r, 1.0f);
+    EXPECT_FLOAT_EQ(btn_data->text_color.g, 1.0f);
+    EXPECT_FLOAT_EQ(btn_data->text_color.b, 1.0f);
+    EXPECT_FLOAT_EQ(btn_data->text_color.a, 1.0f);
+
+    EXPECT_FLOAT_EQ(btn_data->animated_text.get().r, 1.0f);
+    EXPECT_FLOAT_EQ(btn_data->animated_text.get().g, 1.0f);
+    EXPECT_FLOAT_EQ(btn_data->animated_text.get().b, 1.0f);
+    EXPECT_FLOAT_EQ(btn_data->animated_text.get().a, 1.0f);
+}
+
 TEST_F(WidgetTestFixture, ButtonClickRebuildsFullDemoTree) {
     ASSERT_TRUE(initialized);
 

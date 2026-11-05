@@ -120,7 +120,8 @@ void scroll_area_paint_fn(core::NodeTree& tree, core::Handle<core::Node> handle,
         core::Color thumb_col =
             data->is_v_thumb_dragging
                 ? s.thumb_drag_color
-                : (data->is_v_thumb_hovered ? s.thumb_hover_color : s.thumb_color);
+                : (data->is_v_thumb_hovered ? s.thumb_hover_color
+                                            : data->animated_thumb_color.get());
         core::Rect thumb_rect{thumb_x, thumb_y, thickness, thumb_h};
         dl->push_quad(thumb_rect, core::CornerRadii::uniform(thickness * 0.5f), thumb_col);
     }
@@ -150,7 +151,8 @@ void scroll_area_paint_fn(core::NodeTree& tree, core::Handle<core::Node> handle,
         core::Color thumb_col =
             data->is_h_thumb_dragging
                 ? s.thumb_drag_color
-                : (data->is_h_thumb_hovered ? s.thumb_hover_color : s.thumb_color);
+                : (data->is_h_thumb_hovered ? s.thumb_hover_color
+                                            : data->animated_thumb_color.get());
         core::Rect thumb_rect{thumb_x, thumb_y, thumb_w, thickness};
         dl->push_quad(thumb_rect, core::CornerRadii::uniform(thickness * 0.5f), thumb_col);
     }
@@ -171,12 +173,33 @@ void scroll_area_destroy_fn(void* user_data) {
 
 } // namespace
 
+void ScrollAreaData::apply_theme(const style::Theme& theme) {
+    scrollbar_style = ScrollbarStyle::from_theme(theme);
+    float duration = theme.transition_duration();
+    if (duration <= 0.0f) {
+        animated_thumb_color.set_immediate(scrollbar_style.thumb_color);
+    } else {
+        animated_thumb_color.tween_to(scrollbar_style.thumb_color, duration, animation::CubicBezier::ease_out());
+    }
+    if (tree && node_handle.is_valid()) {
+        tree->mark_dirty(node_handle, core::kPaint);
+    }
+}
+
 ScrollAreaBuilder::ScrollAreaBuilder(core::NodeTree& tree) : tree_(tree) {
     theme(style::Theme::dark());
 }
 
 ScrollAreaBuilder& ScrollAreaBuilder::theme(const style::Theme& theme) {
     data_.scrollbar_style = ScrollbarStyle::from_theme(theme);
+    return *this;
+}
+
+ScrollAreaBuilder& ScrollAreaBuilder::theme_signal(core::Signal<style::Theme>* sig) {
+    data_.theme_signal = sig;
+    if (sig) {
+        theme(sig->get());
+    }
     return *this;
 }
 
@@ -236,6 +259,7 @@ core::Handle<core::Node> ScrollAreaBuilder::build() {
     data_heap->animated_scroll.set_immediate(data_heap->scroll_offset);
     data_heap->animated_v_thickness.set_immediate(data_heap->scrollbar_style.thickness);
     data_heap->animated_h_thickness.set_immediate(data_heap->scrollbar_style.thickness);
+    data_heap->animated_thumb_color.set_immediate(data_heap->scrollbar_style.thumb_color);
 
     data_heap->animated_scroll.bind_dirty(
         [](void* ctx, uint32_t flags) {
@@ -267,6 +291,26 @@ core::Handle<core::Node> ScrollAreaBuilder::build() {
             }
         },
         data_heap, core::kPaint);
+
+    data_heap->animated_thumb_color.bind_dirty(
+        [](void* ctx, uint32_t flags) {
+            auto* sa = static_cast<ScrollAreaData*>(ctx);
+            if (sa->tree && sa->node_handle.is_valid()) {
+                sa->tree->mark_dirty(sa->node_handle, flags);
+            }
+        },
+        data_heap, core::kPaint);
+
+    if (data_heap->theme_signal) {
+        data_heap->theme_signal->bind_dirty(
+            [](void* ctx, uint32_t) {
+                auto* sa = static_cast<ScrollAreaData*>(ctx);
+                if (sa && sa->theme_signal) {
+                    sa->apply_theme(sa->theme_signal->get());
+                }
+            },
+            data_heap, core::kPaint);
+    }
 
     node->user_data = data_heap;
     node->layout_fn = scroll_area_layout_fn;

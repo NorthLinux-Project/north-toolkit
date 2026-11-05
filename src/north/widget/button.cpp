@@ -81,7 +81,8 @@ void button_paint_fn(core::NodeTree& tree, core::Handle<core::Node> handle, core
         float text_x = origin.x + (node->layout.size.width - data->paragraph->size().width) * 0.5f;
         float text_y =
             origin.y + (node->layout.size.height - data->paragraph->size().height) * 0.5f;
-        data->paragraph->paint(*dl, *dl->glyph_atlas(), {text_x, text_y});
+        core::Color text_color = data->animated_text.get();
+        data->paragraph->paint(*dl, *dl->glyph_atlas(), {text_x, text_y}, text_color);
     }
 }
 
@@ -99,6 +100,79 @@ void button_destroy_fn(void* user_data) {
 }
 
 } // namespace
+
+void ButtonData::update_animation_targets(float duration) {
+    ButtonState st = state.get();
+    const style::BoxStyle& active_style =
+        (st == ButtonState::Pressed)
+            ? pressed_style
+            : (st == ButtonState::Hovered ? hover_style : normal_style);
+
+    animated_bg.tween_to(active_style.background, duration, animation::CubicBezier::ease_out());
+    animated_border.tween_to(active_style.border_color, duration, animation::CubicBezier::ease_out());
+}
+
+void ButtonData::apply_theme(const style::Theme& theme) {
+    const auto& c = theme.colors();
+    text_color = c.on_primary;
+
+    core::CornerRadii radii = normal_style.corner_radii;
+
+    normal_style = style::BoxStyle{.background = c.primary,
+                                   .border_color = c.outline_variant,
+                                   .border_width = normal_style.border_width,
+                                   .corner_radii = radii,
+                                   .padding = padding,
+                                   .shadow_color = normal_style.shadow_color,
+                                   .shadow_radius = normal_style.shadow_radius,
+                                   .shadow_spread = normal_style.shadow_spread,
+                                   .shadow_offset = normal_style.shadow_offset};
+
+    core::Color hover_bg{(std::min)(c.primary.r * 1.15f, 1.0f),
+                         (std::min)(c.primary.g * 1.15f, 1.0f),
+                         (std::min)(c.primary.b * 1.15f, 1.0f), c.primary.a};
+
+    hover_style = style::BoxStyle{.background = hover_bg,
+                                  .border_color = c.outline,
+                                  .border_width = hover_style.border_width,
+                                  .corner_radii = radii,
+                                  .padding = padding,
+                                  .shadow_color = hover_style.shadow_color,
+                                  .shadow_radius = hover_style.shadow_radius,
+                                  .shadow_spread = hover_style.shadow_spread,
+                                  .shadow_offset = hover_style.shadow_offset};
+
+    core::Color pressed_bg{c.primary.r * 0.85f, c.primary.g * 0.85f, c.primary.b * 0.85f,
+                           c.primary.a};
+
+    pressed_style = style::BoxStyle{.background = pressed_bg,
+                                    .border_color = c.outline,
+                                    .border_width = pressed_style.border_width,
+                                    .corner_radii = radii,
+                                    .padding = padding,
+                                    .shadow_color = pressed_style.shadow_color,
+                                    .shadow_radius = pressed_style.shadow_radius,
+                                    .shadow_spread = pressed_style.shadow_spread,
+                                    .shadow_offset = pressed_style.shadow_offset};
+
+    float duration = theme.transition_duration();
+    if (duration <= 0.0f) {
+        ButtonState st = state.get();
+        const style::BoxStyle& active_style =
+            (st == ButtonState::Pressed)
+                ? pressed_style
+                : (st == ButtonState::Hovered ? hover_style : normal_style);
+        animated_bg.set_immediate(active_style.background);
+        animated_border.set_immediate(active_style.border_color);
+        animated_text.set_immediate(text_color);
+    } else {
+        update_animation_targets(duration);
+        animated_text.tween_to(text_color, duration, animation::CubicBezier::ease_out());
+    }
+    if (tree && node_handle.is_valid()) {
+        tree->mark_dirty(node_handle, core::kPaint);
+    }
+}
 
 ButtonBuilder::ButtonBuilder(core::NodeTree& tree, std::string_view label) : tree_(tree) {
     data_.label = std::string(label);
@@ -118,6 +192,11 @@ ButtonBuilder& ButtonBuilder::font(std::shared_ptr<text::Font> font) {
 
 ButtonBuilder& ButtonBuilder::font_size(float size) {
     data_.font_size = size;
+    return *this;
+}
+
+ButtonBuilder& ButtonBuilder::text_color(core::Color color) {
+    data_.text_color = color;
     return *this;
 }
 
@@ -179,6 +258,14 @@ ButtonBuilder& ButtonBuilder::theme(const style::Theme& theme) {
     return *this;
 }
 
+ButtonBuilder& ButtonBuilder::theme_signal(core::Signal<style::Theme>* sig) {
+    data_.theme_signal = sig;
+    if (sig) {
+        theme(sig->get());
+    }
+    return *this;
+}
+
 ButtonBuilder& ButtonBuilder::style(const style::BoxStyle& normal, const style::BoxStyle& hover,
                                     const style::BoxStyle& pressed) {
     data_.normal_style = normal;
@@ -203,6 +290,7 @@ core::Handle<core::Node> ButtonBuilder::build() {
     heap_data->tree = &tree_;
     heap_data->animated_bg.set_immediate(heap_data->normal_style.background);
     heap_data->animated_border.set_immediate(heap_data->normal_style.border_color);
+    heap_data->animated_text.set_immediate(heap_data->text_color);
 
     heap_data->animated_bg.bind_dirty(
         [](void* ctx, uint32_t flags) {
@@ -222,12 +310,32 @@ core::Handle<core::Node> ButtonBuilder::build() {
         },
         heap_data, core::kPaint);
 
+    heap_data->animated_text.bind_dirty(
+        [](void* ctx, uint32_t flags) {
+            auto* btn = static_cast<ButtonData*>(ctx);
+            if (btn->tree && btn->node_handle.is_valid()) {
+                btn->tree->mark_dirty(btn->node_handle, flags);
+            }
+        },
+        heap_data, core::kPaint);
+
     heap_data->state.bind_dirty(
         [](void* ctx, uint32_t) {
             auto* btn = static_cast<ButtonData*>(ctx);
             btn->update_animation_targets();
         },
         heap_data);
+
+    if (heap_data->theme_signal) {
+        heap_data->theme_signal->bind_dirty(
+            [](void* ctx, uint32_t) {
+                auto* btn = static_cast<ButtonData*>(ctx);
+                if (btn && btn->theme_signal) {
+                    btn->apply_theme(btn->theme_signal->get());
+                }
+            },
+            heap_data, core::kPaint);
+    }
 
     node->user_data = heap_data;
     node->layout_fn = &button_layout_fn;

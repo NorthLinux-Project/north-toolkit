@@ -24,7 +24,9 @@ public:
     void mark_dirty(Node::HandleType handle, uint32_t flags) noexcept;
 
     void layout(const layout::BoxConstraints& root_constraints);
+    Size layout_subtree(Node::HandleType handle, const layout::BoxConstraints& constraints);
     void paint(void* stream);
+    void paint_subtree(Node::HandleType handle, Point origin, void* stream);
     void paint_children(Node::HandleType handle, Point origin, void* stream);
 
     void set_default_paint(PaintFn fn) noexcept { default_paint_fn_ = fn; }

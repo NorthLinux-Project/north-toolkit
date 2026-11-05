@@ -1,6 +1,8 @@
 #include "north/render/display_list.hpp"
+#include "north/render/path_tessellator.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <cstring>
 
 namespace north::render {
@@ -63,6 +65,29 @@ void DisplayList::push_shadow(core::Rect bounds, core::CornerRadii radii, core::
     cmd.shadow.offset = offset;
 }
 
+void DisplayList::push_image(gpu::TextureId texture, core::Rect bounds, core::CornerRadii radii,
+                             core::Rect uv_rect, core::Color tint, core::Color border_color,
+                             core::Edges border_width) noexcept {
+    if (texture == gpu::kInvalidTexture) {
+        return;
+    }
+    ensure_capacity();
+    if (!commands_ || count_ >= capacity_) {
+        return;
+    }
+
+    DrawCommand& cmd = commands_[count_++];
+    cmd.type = CommandType::Image;
+    cmd.clip_rect = current_clip();
+    cmd.image.texture = texture;
+    cmd.image.bounds = bounds;
+    cmd.image.radii = radii;
+    cmd.image.uv_rect = uv_rect;
+    cmd.image.tint = tint;
+    cmd.image.border_color = border_color;
+    cmd.image.border_width = border_width;
+}
+
 void DisplayList::push_glyph_run(gpu::TextureId atlas_texture,
                                  std::span<const gpu::GlyphInstance> glyphs) noexcept {
     ensure_capacity();
@@ -75,6 +100,63 @@ void DisplayList::push_glyph_run(gpu::TextureId atlas_texture,
     cmd.clip_rect = current_clip();
     cmd.glyph_run.atlas_texture = atlas_texture;
     cmd.glyph_run.glyphs = glyphs;
+}
+
+void DisplayList::push_path_mesh(std::span<const gpu::PathVertex> vertices,
+                                std::span<const uint16_t> indices) noexcept {
+    if (vertices.empty() || indices.empty()) {
+        return;
+    }
+    ensure_capacity();
+    if (!commands_ || count_ >= capacity_) {
+        return;
+    }
+
+    DrawCommand& cmd = commands_[count_++];
+    cmd.type = CommandType::PathMesh;
+    cmd.clip_rect = current_clip();
+    cmd.path_mesh.vertices = vertices;
+    cmd.path_mesh.indices = indices;
+}
+
+void DisplayList::push_path_fill(const Path& path, core::Color color,
+                                FillRule rule) noexcept {
+    PathMesh mesh;
+    PathTessellator::tessellate_fill(path, color, current_clip(), rule, mesh);
+    if (mesh.empty()) {
+        return;
+    }
+
+    auto v_span = arena_.alloc_array<gpu::PathVertex>(mesh.vertices.size());
+    auto i_span = arena_.alloc_array<uint16_t>(mesh.indices.size());
+    if (v_span.empty() || i_span.empty()) {
+        return;
+    }
+
+    std::memcpy(v_span.data(), mesh.vertices.data(), mesh.vertices.size() * sizeof(gpu::PathVertex));
+    std::memcpy(i_span.data(), mesh.indices.data(), mesh.indices.size() * sizeof(uint16_t));
+
+    push_path_mesh(v_span, i_span);
+}
+
+void DisplayList::push_path_stroke(const Path& path, core::Color color,
+                                  const StrokeStyle& style) noexcept {
+    PathMesh mesh;
+    PathTessellator::tessellate_stroke(path, color, current_clip(), style, mesh);
+    if (mesh.empty()) {
+        return;
+    }
+
+    auto v_span = arena_.alloc_array<gpu::PathVertex>(mesh.vertices.size());
+    auto i_span = arena_.alloc_array<uint16_t>(mesh.indices.size());
+    if (v_span.empty() || i_span.empty()) {
+        return;
+    }
+
+    std::memcpy(v_span.data(), mesh.vertices.data(), mesh.vertices.size() * sizeof(gpu::PathVertex));
+    std::memcpy(i_span.data(), mesh.indices.data(), mesh.indices.size() * sizeof(uint16_t));
+
+    push_path_mesh(v_span, i_span);
 }
 
 void DisplayList::push_clip(core::Rect clip) noexcept {

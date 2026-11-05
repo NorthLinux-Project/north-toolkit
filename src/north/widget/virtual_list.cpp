@@ -37,8 +37,9 @@ core::Size virtual_list_layout_fn(core::NodeTree& tree, core::Handle<core::Node>
 
     if (data->item_count == 0 || !data->item_builder) {
         while (!node->children.empty()) {
-            tree.remove_child(handle, node->children.back());
+            tree.destroy_node(node->children.back());
         }
+        data->window_initialized = false;
         return viewport;
     }
 
@@ -49,11 +50,26 @@ core::Size virtual_list_layout_fn(core::NodeTree& tree, core::Handle<core::Node>
         static_cast<int>(std::ceil((data->scroll_offset.y + viewport.height + item_h) / item_h));
     last = (std::min)(static_cast<int>(data->item_count - 1), last);
 
+    if (data->window_initialized && first == static_cast<int>(data->first_visible_idx) &&
+        last == static_cast<int>(data->last_visible_idx) &&
+        node->children.size() == static_cast<size_t>(last - first + 1)) {
+        for (int i = first; i <= last; ++i) {
+            auto ch = node->children[static_cast<size_t>(i - first)];
+            auto* ch_node = tree.get(ch);
+            if (ch_node) {
+                ch_node->layout.offset =
+                    core::Point{0.0f, static_cast<float>(i) * item_h - data->scroll_offset.y};
+            }
+        }
+        return viewport;
+    }
+
     data->first_visible_idx = static_cast<size_t>(first);
     data->last_visible_idx = static_cast<size_t>(last);
+    data->window_initialized = true;
 
     while (!node->children.empty()) {
-        tree.remove_child(handle, node->children.back());
+        tree.destroy_node(node->children.back());
     }
 
     layout::BoxConstraints item_constraints =
@@ -123,7 +139,8 @@ void virtual_list_paint_fn(core::NodeTree& tree, core::Handle<core::Node> handle
         core::Color thumb_col =
             data->is_thumb_dragging
                 ? s.thumb_drag_color
-                : (data->is_thumb_hovered ? s.thumb_hover_color : s.thumb_color);
+                : (data->is_thumb_hovered ? s.thumb_hover_color
+                                          : data->animated_thumb_color.get());
         core::Rect thumb_rect{thumb_x, thumb_y, thickness, thumb_h};
         dl->push_quad(thumb_rect, core::CornerRadii::uniform(thickness * 0.5f), thumb_col);
     }
@@ -144,12 +161,33 @@ void virtual_list_destroy_fn(void* user_data) {
 
 } // namespace
 
+void VirtualListData::apply_theme(const style::Theme& theme) {
+    scrollbar_style = ScrollbarStyle::from_theme(theme);
+    float duration = theme.transition_duration();
+    if (duration <= 0.0f) {
+        animated_thumb_color.set_immediate(scrollbar_style.thumb_color);
+    } else {
+        animated_thumb_color.tween_to(scrollbar_style.thumb_color, duration, animation::CubicBezier::ease_out());
+    }
+    if (tree && node_handle.is_valid()) {
+        tree->mark_dirty(node_handle, core::kPaint);
+    }
+}
+
 VirtualListBuilder::VirtualListBuilder(core::NodeTree& tree) : tree_(tree) {
     theme(style::Theme::dark());
 }
 
 VirtualListBuilder& VirtualListBuilder::theme(const style::Theme& theme) {
     data_.scrollbar_style = ScrollbarStyle::from_theme(theme);
+    return *this;
+}
+
+VirtualListBuilder& VirtualListBuilder::theme_signal(core::Signal<style::Theme>* sig) {
+    data_.theme_signal = sig;
+    if (sig) {
+        theme(sig->get());
+    }
     return *this;
 }
 
@@ -214,6 +252,7 @@ core::Handle<core::Node> VirtualListBuilder::build() {
     data_heap->target_scroll_y = data_heap->scroll_offset.y;
     data_heap->animated_scroll_y.set_immediate(data_heap->scroll_offset.y);
     data_heap->animated_thickness.set_immediate(data_heap->scrollbar_style.thickness);
+    data_heap->animated_thumb_color.set_immediate(data_heap->scrollbar_style.thumb_color);
 
     data_heap->animated_scroll_y.bind_dirty(
         [](void* ctx, uint32_t flags) {
@@ -233,6 +272,26 @@ core::Handle<core::Node> VirtualListBuilder::build() {
             }
         },
         data_heap, core::kPaint);
+
+    data_heap->animated_thumb_color.bind_dirty(
+        [](void* ctx, uint32_t flags) {
+            auto* vl = static_cast<VirtualListData*>(ctx);
+            if (vl->tree && vl->node_handle.is_valid()) {
+                vl->tree->mark_dirty(vl->node_handle, flags);
+            }
+        },
+        data_heap, core::kPaint);
+
+    if (data_heap->theme_signal) {
+        data_heap->theme_signal->bind_dirty(
+            [](void* ctx, uint32_t) {
+                auto* vl = static_cast<VirtualListData*>(ctx);
+                if (vl && vl->theme_signal) {
+                    vl->apply_theme(vl->theme_signal->get());
+                }
+            },
+            data_heap, core::kPaint);
+    }
 
     node->user_data = data_heap;
     node->layout_fn = virtual_list_layout_fn;

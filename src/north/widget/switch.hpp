@@ -21,6 +21,7 @@ public:
     SwitchBuilder& font(std::shared_ptr<text::Font> font);
     SwitchBuilder& font_size(float size);
     SwitchBuilder& theme(const style::Theme& theme);
+    SwitchBuilder& theme_signal(core::Signal<style::Theme>* sig);
     SwitchBuilder& on_change(void (*fn)(bool checked, void* user_data), void* user_data = nullptr);
 
     [[nodiscard]] core::Handle<core::Node> build();

@@ -9,6 +9,11 @@ add_library(north STATIC
     north/render/display_list.cpp
     north/render/quad_batcher.cpp
     north/render/glyph_batcher.cpp
+    north/render/image_batcher.cpp
+    north/render/path_batcher.cpp
+    north/render/path.cpp
+    north/render/svg_path.cpp
+    north/render/path_tessellator.cpp
     north/render/renderer.cpp
     north/text/font.cpp
     north/text/font_manager.cpp
@@ -20,6 +25,11 @@ add_library(north STATIC
     north/text/text_buffer.cpp
     north/platform/win32/win32_window.cpp
     north/platform/win32/win32_app.cpp
+    north/color/hct.cpp
+    north/color/tonal_palette.cpp
+    north/color/scheme.cpp
+    north/image/image_decoder.cpp
+    north/image/image_cache.cpp
     north/style/theme.cpp
     north/event/input_dispatcher.cpp
     north/animation/curve.cpp
@@ -34,6 +44,14 @@ add_library(north STATIC
     north/widget/switch.cpp
     north/widget/slider.cpp
     north/widget/radio_button.cpp
+    north/widget/icon.cpp
+    north/widget/image.cpp
+    north/overlay/positioning.cpp
+    north/overlay/overlay_manager.cpp
+    north/widget/dialog.cpp
+    north/widget/menu.cpp
+    north/widget/tooltip.cpp
+    north/widget/popover.cpp
 )
 
 target_include_directories(north PUBLIC
@@ -47,6 +65,7 @@ target_link_libraries(north PUBLIC
     dxgi
     dwrite
     imm32
+    windowscodecs
     Freetype::Freetype
     harfbuzz::harfbuzz
     sheenbidi

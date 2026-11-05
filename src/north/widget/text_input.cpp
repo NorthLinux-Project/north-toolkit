@@ -47,12 +47,14 @@ void text_input_paint_fn(core::NodeTree& tree, core::Handle<core::Node> handle, 
                         active_style.shadow_offset);
     }
 
-    if (active_style.background.a > 0.0f ||
-        (active_style.border_color.a > 0.0f &&
+    core::Color bg = data->animated_bg.get();
+    core::Color border = data->animated_border.get();
+
+    if (bg.a > 0.0f ||
+        (border.a > 0.0f &&
          (active_style.border_width.top > 0.0f || active_style.border_width.right > 0.0f ||
           active_style.border_width.bottom > 0.0f || active_style.border_width.left > 0.0f))) {
-        dl->push_quad(bounds, active_style.corner_radii, active_style.background,
-                      active_style.border_color, active_style.border_width);
+        dl->push_quad(bounds, active_style.corner_radii, bg, border, active_style.border_width);
     }
 
     if (!data->font)
@@ -145,27 +147,28 @@ void text_input_paint_fn(core::NodeTree& tree, core::Handle<core::Node> handle, 
                           core::Color{0.0f, 0.0f, 0.0f, 0.0f}, core::Edges::uniform(0.0f));
         }
 
+        core::Color cur_text_color = data->animated_text.get();
         text::ParagraphBuilder pb(text::TextAlign::Left);
         if (!has_comp) {
             pb.add_text(data->buffer.text(), text::TextStyle{.font = data->font,
                                                              .font_size = data->font_size,
-                                                             .color = data->text_color});
+                                                             .color = cur_text_color});
         } else {
             size_t cur = data->buffer.cursor_pos();
             if (cur > 0) {
                 pb.add_text(data->buffer.text().substr(0, cur),
                             text::TextStyle{.font = data->font,
                                             .font_size = data->font_size,
-                                            .color = data->text_color});
+                                            .color = cur_text_color});
             }
             pb.add_text(data->composition_text, text::TextStyle{.font = data->font,
                                                                 .font_size = data->font_size,
-                                                                .color = data->text_color});
+                                                                .color = cur_text_color});
             if (cur < data->buffer.text().size()) {
                 pb.add_text(data->buffer.text().substr(cur),
                             text::TextStyle{.font = data->font,
                                             .font_size = data->font_size,
-                                            .color = data->text_color});
+                                            .color = cur_text_color});
             }
         }
 
@@ -173,7 +176,7 @@ void text_input_paint_fn(core::NodeTree& tree, core::Handle<core::Node> handle, 
         data->paragraph->layout(layout::BoxConstraints::loose(
             {(std::max)(4096.0f, caret_x + 1000.0f), content_area_h}));
         if (dl->glyph_atlas()) {
-            data->paragraph->paint(*dl, *dl->glyph_atlas(), text_origin);
+            data->paragraph->paint(*dl, *dl->glyph_atlas(), text_origin, cur_text_color);
         }
 
         if (has_comp) {
@@ -186,7 +189,7 @@ void text_input_paint_fn(core::NodeTree& tree, core::Handle<core::Node> handle, 
                     .total_advance;
             core::Rect uline{text_origin.x + pre_comp_x, text_origin.y + line_h - 1.0f, comp_w,
                              1.5f};
-            dl->push_quad(uline, core::CornerRadii::uniform(0.0f), data->text_color,
+            dl->push_quad(uline, core::CornerRadii::uniform(0.0f), cur_text_color,
                           core::Color{0.0f, 0.0f, 0.0f, 0.0f}, core::Edges::uniform(0.0f));
         }
     }
@@ -214,6 +217,52 @@ void text_input_destroy_fn(void* user_data) {
 }
 
 } // namespace
+
+void TextInputData::apply_theme(const style::Theme& theme) {
+    const auto& c = theme.colors();
+    text_color = c.on_surface;
+    placeholder_color = c.outline;
+    cursor_color = c.on_surface;
+    selection_color = core::Color{c.primary.r, c.primary.g, c.primary.b, 0.50f};
+
+    core::CornerRadii radii = normal_style.corner_radii;
+
+    normal_style = style::BoxStyle{.background = c.surface_variant,
+                                   .border_color = c.outline_variant,
+                                   .border_width = normal_style.border_width,
+                                   .corner_radii = radii,
+                                   .padding = padding,
+                                   .shadow_color = normal_style.shadow_color,
+                                   .shadow_radius = normal_style.shadow_radius,
+                                   .shadow_spread = normal_style.shadow_spread,
+                                   .shadow_offset = normal_style.shadow_offset};
+
+    focus_style = style::BoxStyle{.background = c.surface_variant,
+                                  .border_color = c.outline,
+                                  .border_width = focus_style.border_width,
+                                  .corner_radii = radii,
+                                  .padding = padding,
+                                  .shadow_color = focus_style.shadow_color,
+                                  .shadow_radius = focus_style.shadow_radius,
+                                  .shadow_spread = focus_style.shadow_spread,
+                                  .shadow_offset = focus_style.shadow_offset};
+
+    const auto& active = is_focused ? focus_style : normal_style;
+    float duration = theme.transition_duration();
+    if (duration <= 0.0f) {
+        animated_bg.set_immediate(active.background);
+        animated_border.set_immediate(active.border_color);
+        animated_text.set_immediate(text_color);
+    } else {
+        animated_bg.tween_to(active.background, duration, animation::CubicBezier::ease_out());
+        animated_border.tween_to(active.border_color, duration, animation::CubicBezier::ease_out());
+        animated_text.tween_to(text_color, duration, animation::CubicBezier::ease_out());
+    }
+
+    if (tree && node_handle.is_valid()) {
+        tree->mark_dirty(node_handle, core::kPaint);
+    }
+}
 
 TextInputBuilder::TextInputBuilder(core::NodeTree& tree) : tree_(tree) {
     data_.font_size = 14.0f;
@@ -288,6 +337,14 @@ TextInputBuilder& TextInputBuilder::theme(const style::Theme& theme) {
     return *this;
 }
 
+TextInputBuilder& TextInputBuilder::theme_signal(core::Signal<style::Theme>* sig) {
+    data_.theme_signal = sig;
+    if (sig) {
+        theme(sig->get());
+    }
+    return *this;
+}
+
 TextInputBuilder& TextInputBuilder::selection_color(core::Color color) {
     data_.selection_color = color;
     return *this;
@@ -326,6 +383,53 @@ core::Handle<core::Node> TextInputBuilder::build() {
     }
 
     auto* heap_data = new TextInputData(std::move(data_));
+    heap_data->tree = &tree_;
+    heap_data->node_handle = handle;
+
+    const auto& initial_style =
+        heap_data->is_focused ? heap_data->focus_style : heap_data->normal_style;
+    heap_data->animated_bg.set_immediate(initial_style.background);
+    heap_data->animated_border.set_immediate(initial_style.border_color);
+    heap_data->animated_text.set_immediate(heap_data->text_color);
+
+    heap_data->animated_bg.bind_dirty(
+        [](void* ctx, uint32_t flags) {
+            auto* input = static_cast<TextInputData*>(ctx);
+            if (input->tree && input->node_handle.is_valid()) {
+                input->tree->mark_dirty(input->node_handle, flags);
+            }
+        },
+        heap_data, core::kPaint);
+
+    heap_data->animated_border.bind_dirty(
+        [](void* ctx, uint32_t flags) {
+            auto* input = static_cast<TextInputData*>(ctx);
+            if (input->tree && input->node_handle.is_valid()) {
+                input->tree->mark_dirty(input->node_handle, flags);
+            }
+        },
+        heap_data, core::kPaint);
+
+    heap_data->animated_text.bind_dirty(
+        [](void* ctx, uint32_t flags) {
+            auto* input = static_cast<TextInputData*>(ctx);
+            if (input->tree && input->node_handle.is_valid()) {
+                input->tree->mark_dirty(input->node_handle, flags);
+            }
+        },
+        heap_data, core::kPaint);
+
+    if (heap_data->theme_signal) {
+        heap_data->theme_signal->bind_dirty(
+            [](void* ctx, uint32_t) {
+                auto* input = static_cast<TextInputData*>(ctx);
+                if (input && input->theme_signal) {
+                    input->apply_theme(input->theme_signal->get());
+                }
+            },
+            heap_data, core::kPaint);
+    }
+
     node->user_data = heap_data;
     node->layout_fn = &text_input_layout_fn;
     node->paint_fn = &text_input_paint_fn;

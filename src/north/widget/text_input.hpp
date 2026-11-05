@@ -20,6 +20,7 @@ public:
     TextInputBuilder& width(float width);
     TextInputBuilder& height(float height);
     TextInputBuilder& theme(const style::Theme& theme);
+    TextInputBuilder& theme_signal(core::Signal<style::Theme>* sig);
     TextInputBuilder& selection_color(core::Color color);
     TextInputBuilder& style(const style::BoxStyle& normal, const style::BoxStyle& focused);
     TextInputBuilder& on_change(void (*fn)(std::string_view, void*), void* user_data = nullptr);

@@ -1,6 +1,8 @@
 #include "north/gpu/d3d11/d3d11_device.hpp"
 #include "north/gpu/d3d11/shaders/glyph_ps.h"
 #include "north/gpu/d3d11/shaders/glyph_vs.h"
+#include "north/gpu/d3d11/shaders/path_ps.h"
+#include "north/gpu/d3d11/shaders/path_vs.h"
 #include "north/gpu/d3d11/shaders/quad_ps.h"
 #include "north/gpu/d3d11/shaders/quad_vs.h"
 
@@ -135,6 +137,66 @@ TEST_F(GPUDeviceTestFixture, ExecutesOffscreenRenderPass) {
     device->end_frame();
 
     device->destroy_buffer(*ib_id);
+    device->destroy_pipeline(*pipe_id);
+}
+
+TEST_F(GPUDeviceTestFixture, ExecutesIndexedPathRenderPass) {
+    ASSERT_TRUE(initialized);
+
+    std::span<const uint8_t> vs_bytes(g_path_vs, sizeof(g_path_vs));
+    std::span<const uint8_t> ps_bytes(g_path_ps, sizeof(g_path_ps));
+    auto pipe_id = device->create_pipeline(vs_bytes, ps_bytes, BlendMode::PremultipliedAlpha,
+                                           VertexLayout::Path);
+    ASSERT_TRUE(pipe_id.has_value());
+
+    // 3 vertices for a triangle
+    PathVertex vertices[3]{};
+    vertices[0].position = core::Point{50.0f, 50.0f};
+    vertices[0].aa_coverage = 1.0f;
+    vertices[0].color = core::Color{1.0f, 0.0f, 0.0f, 1.0f};
+    vertices[0].clip_rect = core::Rect{0.0f, 0.0f, 800.0f, 600.0f};
+
+    vertices[1].position = core::Point{150.0f, 50.0f};
+    vertices[1].aa_coverage = 1.0f;
+    vertices[1].color = core::Color{0.0f, 1.0f, 0.0f, 1.0f};
+    vertices[1].clip_rect = core::Rect{0.0f, 0.0f, 800.0f, 600.0f};
+
+    vertices[2].position = core::Point{100.0f, 150.0f};
+    vertices[2].aa_coverage = 1.0f;
+    vertices[2].color = core::Color{0.0f, 0.0f, 1.0f, 1.0f};
+    vertices[2].clip_rect = core::Rect{0.0f, 0.0f, 800.0f, 600.0f};
+
+    BufferDesc vb_desc{
+        .size = sizeof(vertices), .usage = BufferUsage::Vertex, .dynamic = true};
+    auto vb_id = device->create_buffer(vb_desc);
+    ASSERT_TRUE(vb_id.has_value());
+    device->update_buffer(*vb_id, 0,
+                          std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(vertices),
+                                                   sizeof(vertices)));
+
+    uint16_t indices[3] = {0, 1, 2};
+    BufferDesc ib_desc{
+        .size = sizeof(indices), .usage = BufferUsage::Index, .dynamic = true};
+    auto ib_id = device->create_buffer(ib_desc);
+    ASSERT_TRUE(ib_id.has_value());
+    device->update_buffer(*ib_id, 0,
+                          std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(indices),
+                                                   sizeof(indices)));
+
+    ViewConstants constants{.viewport_width = 800.0f, .viewport_height = 600.0f};
+    device->begin_frame();
+    device->clear(core::Color{0.1f, 0.1f, 0.1f, 1.0f});
+    device->set_viewport(800.0f, 600.0f);
+    device->set_pipeline(*pipe_id);
+    device->set_constants(0, std::span<const uint8_t>(
+                                 reinterpret_cast<const uint8_t*>(&constants), sizeof(constants)));
+    device->set_vertex_buffer(*vb_id, sizeof(PathVertex));
+    device->set_index_buffer(*ib_id, IndexFormat::UInt16);
+    device->draw_indexed(3);
+    device->end_frame();
+
+    device->destroy_buffer(*ib_id);
+    device->destroy_buffer(*vb_id);
     device->destroy_pipeline(*pipe_id);
 }
 

@@ -14,6 +14,7 @@ public:
     ScrollAreaBuilder& height(float h);
     ScrollAreaBuilder& smooth_scroll(bool enable = true);
     ScrollAreaBuilder& theme(const style::Theme& theme);
+    ScrollAreaBuilder& theme_signal(core::Signal<style::Theme>* sig);
     ScrollAreaBuilder& scrollbar_style(const ScrollbarStyle& style);
     ScrollAreaBuilder& scroll_offset(core::Point offset);
     ScrollAreaBuilder& child(core::Handle<core::Node> child_handle);

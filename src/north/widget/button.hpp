@@ -17,9 +17,11 @@ public:
     ButtonBuilder& on_click(ClickCallbackFn fn, void* user_data = nullptr);
     ButtonBuilder& font(std::shared_ptr<text::Font> font);
     ButtonBuilder& font_size(float size);
+    ButtonBuilder& text_color(core::Color color);
     ButtonBuilder& padding(core::Edges padding);
     ButtonBuilder& corner_radii(core::CornerRadii radii);
     ButtonBuilder& theme(const style::Theme& theme);
+    ButtonBuilder& theme_signal(core::Signal<style::Theme>* sig);
     ButtonBuilder& style(const style::BoxStyle& normal, const style::BoxStyle& hover,
                          const style::BoxStyle& pressed);
 

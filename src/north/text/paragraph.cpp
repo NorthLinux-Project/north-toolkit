@@ -186,7 +186,8 @@ void Paragraph::layout(const layout::BoxConstraints& constraints) {
     baseline_ = lines_.empty() ? 0.0f : lines_[0].baseline;
 }
 
-void Paragraph::paint(render::DisplayList& dl, GlyphAtlas& atlas, core::Point origin) {
+void Paragraph::paint(render::DisplayList& dl, GlyphAtlas& atlas, core::Point origin,
+                      std::optional<core::Color> color_override) {
     if (positioned_glyphs_.empty()) {
         return;
     }
@@ -224,7 +225,7 @@ void Paragraph::paint(render::DisplayList& dl, GlyphAtlas& atlas, core::Point or
         inst.dst_rect =
             core::Rect{std::floor(gx) + cg.offset_x, baseline_y - cg.offset_y, cg.width, cg.height};
         inst.uv_rect = cg.uv_rect;
-        inst.color = g.color.premultiply();
+        inst.color = color_override.has_value() ? color_override->premultiply() : g.color.premultiply();
         inst.clip_rect = dl.current_clip();
 
         batch_glyphs.push_back(inst);

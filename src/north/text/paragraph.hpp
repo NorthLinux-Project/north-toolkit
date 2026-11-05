@@ -10,6 +10,7 @@
 #include "north/text/shaper.hpp"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -54,7 +55,8 @@ public:
     explicit Paragraph(std::vector<TextSpan> spans, TextAlign align = TextAlign::Left);
 
     void layout(const layout::BoxConstraints& constraints);
-    void paint(render::DisplayList& dl, GlyphAtlas& atlas, core::Point origin);
+    void paint(render::DisplayList& dl, GlyphAtlas& atlas, core::Point origin,
+               std::optional<core::Color> color_override = std::nullopt);
 
     [[nodiscard]] core::Size size() const noexcept { return size_; }
     [[nodiscard]] float baseline() const noexcept { return baseline_; }

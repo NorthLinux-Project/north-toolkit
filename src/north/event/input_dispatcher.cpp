@@ -1,5 +1,6 @@
 #include "north/event/input_dispatcher.hpp"
 
+#include "north/overlay/overlay_manager.hpp"
 #include "north/platform/win32/win32_window.hpp"
 #include "north/text/shaper.hpp"
 #include "north/widget/widget_data.hpp"
@@ -83,6 +84,26 @@ core::Handle<core::Node> InputDispatcher::hit_test_recursive(core::Handle<core::
 }
 
 core::Handle<core::Node> InputDispatcher::hit_test(core::Point screen_point) {
+    if (overlay_manager_ && overlay_manager_->has_active_overlays()) {
+        auto entries = overlay_manager_->entries();
+        for (auto it = entries.rbegin(); it != entries.rend(); ++it) {
+            if (!it->active || !it->content_node.is_valid()) {
+                continue;
+            }
+            if (it->computed_bounds.contains(screen_point)) {
+                auto hit = hit_test_recursive(
+                    it->content_node, core::Point{it->computed_bounds.x, it->computed_bounds.y},
+                    screen_point);
+                if (hit.is_valid()) {
+                    return hit;
+                }
+            }
+            if (it->config.modal) {
+                return {};
+            }
+        }
+    }
+
     if (!tree_.root().is_valid()) {
         return {};
     }
@@ -268,6 +289,21 @@ void InputDispatcher::update_ime_window_position() {
 }
 
 void InputDispatcher::on_pointer(const platform::PointerEvent& event) {
+    if (overlay_manager_ && overlay_manager_->has_active_modal()) {
+        const auto* modal = overlay_manager_->top_modal();
+        if (modal && !modal->computed_bounds.contains(event.position)) {
+            if (event.action == platform::PointerAction::Down) {
+                if (modal->config.barrier_dismissible) {
+                    overlay_manager_->dismiss_top_modal();
+                }
+            }
+            if (fallback_listener_) {
+                fallback_listener_->on_pointer(event);
+            }
+            return;
+        }
+    }
+
     core::Handle<core::Node> raw_hit = hit_test(event.position);
     core::Handle<core::Node> target = find_interactive_target(raw_hit);
 
@@ -381,6 +417,7 @@ void InputDispatcher::on_pointer(const platform::PointerEvent& event) {
                             cur = p->parent;
                         }
                         sl->seek_from_pointer(event.position.x - node_origin.x);
+                        return;
                     }
                 }
             }
@@ -825,6 +862,13 @@ void InputDispatcher::on_dpi_changed(float dpi_scale, core::Rect suggested_rect)
 }
 
 void InputDispatcher::on_key(const platform::KeyEvent& event) {
+    if (event.is_down && event.key_code == VK_ESCAPE) {
+        if (overlay_manager_ && overlay_manager_->has_active_overlays()) {
+            overlay_manager_->dismiss_top_modal();
+            return;
+        }
+    }
+
     if (event.is_down && event.key_code == VK_TAB) {
         cycle_focus((event.modifiers & platform::kModShift) != 0);
         return;

@@ -58,6 +58,12 @@ void Win32App::pump_events() {
             running_ = false;
             break;
         }
+        if (msg.message == WM_MOUSEMOVE) {
+            MSG next_msg;
+            if (PeekMessageW(&next_msg, msg.hwnd, WM_MOUSEMOVE, WM_MOUSEMOVE, PM_NOREMOVE)) {
+                continue;
+            }
+        }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }

@@ -25,6 +25,7 @@ public:
     BoxBuilder& width(float w);
     BoxBuilder& height(float h);
     BoxBuilder& size(core::Size sz);
+    BoxBuilder& theme_signal(core::Signal<style::Theme>* sig, BoxThemeFn on_theme = nullptr);
     BoxBuilder& flex_grow(float grow);
     BoxBuilder& flex_shrink(float shrink);
     BoxBuilder& flex_basis(float basis);

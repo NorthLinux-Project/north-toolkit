@@ -23,6 +23,7 @@ public:
     RadioButtonBuilder& font(std::shared_ptr<text::Font> font);
     RadioButtonBuilder& font_size(float size);
     RadioButtonBuilder& theme(const style::Theme& theme);
+    RadioButtonBuilder& theme_signal(core::Signal<style::Theme>* sig);
     RadioButtonBuilder& on_select(void (*fn)(int value, void* user_data),
                                   void* user_data = nullptr);
 
