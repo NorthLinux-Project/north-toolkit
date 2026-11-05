@@ -92,6 +92,15 @@ overlay::OverlayId PopoverBuilder::show() {
 
     auto card = card_builder.build();
 
+    struct PopoverDismissContext {
+        core::NodeTree* tree{nullptr};
+        core::Handle<core::Node> card_node{};
+    };
+    auto* ctx = new PopoverDismissContext{
+        .tree = &tree_,
+        .card_node = card,
+    };
+
     overlay::OverlayConfig cfg{
         .placement = config_.placement,
         .offset = config_.offset,
@@ -100,6 +109,15 @@ overlay::OverlayId PopoverBuilder::show() {
         .modal = config_.modal,
         .barrier_dismissible = config_.barrier_dismissible,
         .barrier_color = core::Color{0.0f, 0.0f, 0.0f, 0.0f},
+        .on_dismiss =
+            [](void* ud) {
+                auto* p_ctx = static_cast<PopoverDismissContext*>(ud);
+                if (p_ctx->tree && p_ctx->card_node.is_valid()) {
+                    p_ctx->tree->destroy_node(p_ctx->card_node);
+                }
+                delete p_ctx;
+            },
+        .dismiss_user_data = ctx,
     };
 
     if (has_point_) {

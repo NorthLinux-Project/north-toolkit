@@ -65,31 +65,18 @@ Rasterizing a glyph strictly at integer pixel coordinates causes noticeable jitt
 
 ---
 
-## 3. Paragraph & Text Layout API
+## 3. Paragraph, Multiline Editor & Fuzzy Matcher
 
-The high-level [`Paragraph`](../src/north/text/paragraph.hpp) and [`TextLayout`](../src/north/text/text_layout.hpp) structs coordinate shaping, word wrapping, and text measurement:
+### Paragraph & Text Layout
+The high-level [`Paragraph`](../src/north/text/paragraph.hpp) and [`Shaper`](../src/north/text/shaper.hpp) coordinate shaping, word wrapping, and text measurement across single-line and multiline runs.
 
-```cpp
-#include "north/text/paragraph.hpp"
-#include "north/text/font_cache.hpp"
+### Multiline Text Editor (`text::TextEditor`)
+[`TextEditor`](../src/north/text/text_editor.hpp) provides a headless 2D document editing engine backing [`TextAreaBuilder`](../src/north/widget/text_area.hpp):
+- **2D Cursor Navigation**: Up/Down navigation preserving preferred horizontal column affinity across lines of varying lengths, plus Left/Right, Home/End, and Ctrl+Word movement.
+- **UTF-8 Boundary Safety**: All cursor movements, selections, and deletions align strictly to UTF-8 codepoint boundaries.
+- **Coalesced Undo/Redo**: Consecutive character insertions are coalesced into atomic undo snapshots, paired with Win32 `CF_UNICODETEXT` clipboard integration ([`Clipboard`](../src/north/platform/clipboard.hpp)).
 
-using namespace north;
-
-void layout_and_draw_text(text::FontCache& font_cache, render::DisplayList& dl) {
-    text::TextStyle style{
-        .font_family = "Segoe UI",
-        .font_size = 16.0f,
-        .line_height = 24.0f,
-        .color = core::Color::from_rgba8(255, 255, 255, 255)
-    };
-
-    text::Paragraph paragraph(font_cache);
-    paragraph.set_text("North Toolkit delivers high-performance native typography.", style);
-    paragraph.set_max_width(400.0f); // Triggers automatic word wrapping
-
-    paragraph.layout();
-
-    core::Size measured_size = paragraph.size();
-    paragraph.paint(dl, core::Point{20.0f, 20.0f});
-}
-```
+### Subsequence Fuzzy Matcher (`text::fuzzy_match`)
+[`fuzzy_match`](../src/north/text/fuzzy_matcher.hpp) powers real-time filtering in [`CommandPaletteBuilder`](../src/north/widget/command_palette.hpp) and [`ComboBoxBuilder`](../src/north/widget/combo_box.hpp):
+- Evaluates case-insensitive subsequence matches with prefix bonuses, word-boundary bonuses (spaces, hyphens, underscores, dots, and camelCase transitions), and consecutive character streak bonuses.
+- Returns ranked scores and matched character index spans for highlight rendering.

@@ -5,6 +5,8 @@
 #include "north/widget/icon.hpp"
 #include "north/widget/text.hpp"
 
+#include <memory>
+
 namespace north::widget {
 
 MenuBuilder::MenuBuilder(core::NodeTree& tree, overlay::OverlayManager& mgr)
@@ -48,18 +50,26 @@ MenuBuilder& MenuBuilder::theme_signal(core::Signal<style::Theme>* sig) {
 
 namespace {
 
+struct MenuDismissContext;
+
 struct MenuItemCallbackWrapper {
     MenuItemActionFn user_callback{nullptr};
     void* user_data{nullptr};
-    overlay::OverlayManager* mgr{nullptr};
-    overlay::OverlayId overlay_id{overlay::kInvalidOverlayId};
+    MenuDismissContext* ctx{nullptr};
 };
 
-core::Handle<core::Node> build_menu_node(core::NodeTree& tree, overlay::OverlayManager& mgr,
-                                         const std::vector<MenuItem>& items, float min_width,
-                                         const style::Theme& theme,
+struct MenuDismissContext {
+    core::NodeTree* tree{nullptr};
+    overlay::OverlayManager* mgr{nullptr};
+    core::Handle<core::Node> card_node{};
+    overlay::OverlayId overlay_id{overlay::kInvalidOverlayId};
+    std::vector<std::unique_ptr<MenuItemCallbackWrapper>> wrappers;
+};
+
+core::Handle<core::Node> build_menu_node(core::NodeTree& tree, const std::vector<MenuItem>& items,
+                                         float min_width, const style::Theme& theme,
                                          core::Signal<style::Theme>* theme_signal,
-                                         std::vector<MenuItemCallbackWrapper*>& out_wrappers) {
+                                         MenuDismissContext* ctx) {
     const auto& c = theme.colors();
     std::vector<core::Handle<core::Node>> item_nodes;
 
@@ -78,13 +88,13 @@ core::Handle<core::Node> build_menu_node(core::NodeTree& tree, overlay::OverlayM
             continue;
         }
 
-        auto* wrapper = new MenuItemCallbackWrapper{
+        auto wrapper = std::make_unique<MenuItemCallbackWrapper>(MenuItemCallbackWrapper{
             .user_callback = it.on_click,
             .user_data = it.user_data,
-            .mgr = &mgr,
-            .overlay_id = overlay::kInvalidOverlayId,
-        };
-        out_wrappers.push_back(wrapper);
+            .ctx = ctx,
+        });
+        MenuItemCallbackWrapper* raw_wrapper = wrapper.get();
+        ctx->wrappers.push_back(std::move(wrapper));
 
         style::BoxStyle norm_style;
         norm_style.background = core::Color{0.0f, 0.0f, 0.0f, 0.0f};
@@ -114,15 +124,19 @@ core::Handle<core::Node> build_menu_node(core::NodeTree& tree, overlay::OverlayM
         btn_builder.on_click(
             [](void* ud) {
                 auto* w = static_cast<MenuItemCallbackWrapper*>(ud);
-                if (w->user_callback) {
-                    w->user_callback(w->user_data);
+                MenuItemActionFn cb = w->user_callback;
+                void* cb_ud = w->user_data;
+                overlay::OverlayManager* m = w->ctx ? w->ctx->mgr : nullptr;
+                overlay::OverlayId oid =
+                    w->ctx ? w->ctx->overlay_id : overlay::kInvalidOverlayId;
+                if (cb) {
+                    cb(cb_ud);
                 }
-                if (w->mgr && w->overlay_id != overlay::kInvalidOverlayId) {
-                    w->mgr->hide_overlay(w->overlay_id);
+                if (m && oid != overlay::kInvalidOverlayId) {
+                    m->hide_overlay(oid);
                 }
-                delete w;
             },
-            wrapper);
+            raw_wrapper);
 
         item_nodes.push_back(btn_builder.build());
     }
@@ -150,12 +164,24 @@ core::Handle<core::Node> build_menu_node(core::NodeTree& tree, overlay::OverlayM
     return card_builder.build();
 }
 
+void on_menu_dismiss(void* ud) {
+    auto* ctx = static_cast<MenuDismissContext*>(ud);
+    if (ctx->tree && ctx->card_node.is_valid()) {
+        ctx->tree->destroy_node(ctx->card_node);
+    }
+    delete ctx;
+}
+
 } // namespace
 
 overlay::OverlayId MenuBuilder::show_at_anchor(core::Handle<core::Node> anchor) {
     const auto& th = theme_signal_ ? theme_signal_->get() : theme_;
-    std::vector<MenuItemCallbackWrapper*> wrappers;
-    auto node = build_menu_node(tree_, mgr_, items_, min_width_, th, theme_signal_, wrappers);
+    auto* ctx = new MenuDismissContext{
+        .tree = &tree_,
+        .mgr = &mgr_,
+    };
+    auto node = build_menu_node(tree_, items_, min_width_, th, theme_signal_, ctx);
+    ctx->card_node = node;
 
     overlay::OverlayConfig cfg{
         .placement = placement_,
@@ -165,19 +191,23 @@ overlay::OverlayId MenuBuilder::show_at_anchor(core::Handle<core::Node> anchor) 
         .modal = true,
         .barrier_dismissible = true,
         .barrier_color = core::Color{0.0f, 0.0f, 0.0f, 0.0f}, // Transparent barrier for dropdowns
+        .on_dismiss = on_menu_dismiss,
+        .dismiss_user_data = ctx,
     };
 
     overlay::OverlayId id = mgr_.show_overlay(node, cfg, anchor);
-    for (auto* w : wrappers) {
-        w->overlay_id = id;
-    }
+    ctx->overlay_id = id;
     return id;
 }
 
 overlay::OverlayId MenuBuilder::show_at_point(core::Point point) {
     const auto& th = theme_signal_ ? theme_signal_->get() : theme_;
-    std::vector<MenuItemCallbackWrapper*> wrappers;
-    auto node = build_menu_node(tree_, mgr_, items_, min_width_, th, theme_signal_, wrappers);
+    auto* ctx = new MenuDismissContext{
+        .tree = &tree_,
+        .mgr = &mgr_,
+    };
+    auto node = build_menu_node(tree_, items_, min_width_, th, theme_signal_, ctx);
+    ctx->card_node = node;
 
     overlay::OverlayConfig cfg{
         .placement = placement_,
@@ -187,12 +217,12 @@ overlay::OverlayId MenuBuilder::show_at_point(core::Point point) {
         .modal = true,
         .barrier_dismissible = true,
         .barrier_color = core::Color{0.0f, 0.0f, 0.0f, 0.0f},
+        .on_dismiss = on_menu_dismiss,
+        .dismiss_user_data = ctx,
     };
 
     overlay::OverlayId id = mgr_.show_overlay_at_point(node, point, cfg);
-    for (auto* w : wrappers) {
-        w->overlay_id = id;
-    }
+    ctx->overlay_id = id;
     return id;
 }
 

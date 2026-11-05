@@ -96,11 +96,18 @@ flowchart BT
 
 During the layout pass, branches with `NodeDirty::kNone` are skipped entirely, yielding sub-microsecond layout passes on large trees with localized changes.
 
+### Screen-Space Coordinate Resolution (`NodeTree::global_offset`)
+Nodes store their layout offset relative to their immediate parent (`node->layout.offset`). To resolve the absolute screen-space origin of any node in the hierarchy (for hit-testing, IME candidate window placement, or overlay anchoring), [`NodeTree::global_offset`](../src/north/core/tree.hpp) accumulates offsets upward to the root:
+
+```cpp
+Point pos = tree.global_offset(node_handle);
+```
+
 ---
 
 ## 4. Layout Subsystem
 
-North Toolkit provides two primary layout engines: [`FlexLayout`](../src/north/layout/flex_layout.hpp) and [`StackLayout`](../src/north/layout/stack_layout.hpp).
+North Toolkit provides two primary layout engines: [`FlexLayout`](../src/north/layout/flex.hpp) and [`StackLayout`](../src/north/layout/stack.hpp).
 
 ### BoxConstraints
 Layouts receive and pass [`BoxConstraints`](../src/north/layout/constraints.hpp):

@@ -5,25 +5,6 @@
 
 namespace north::overlay {
 
-namespace {
-
-core::Point get_global_offset(const core::NodeTree& tree, core::Handle<core::Node> handle) {
-    core::Point pt{0.0f, 0.0f};
-    core::Handle<core::Node> cur = handle;
-    while (cur.is_valid()) {
-        const auto* n = tree.get(cur);
-        if (!n) {
-            break;
-        }
-        pt.x += n->layout.offset.x;
-        pt.y += n->layout.offset.y;
-        cur = n->parent;
-    }
-    return pt;
-}
-
-} // namespace
-
 OverlayId OverlayManager::show_overlay(core::Handle<core::Node> content,
                                        const OverlayConfig& config,
                                        core::Handle<core::Node> anchor) {
@@ -61,35 +42,35 @@ OverlayId OverlayManager::show_overlay_at_rect(core::Handle<core::Node> content,
 void OverlayManager::hide_overlay(OverlayId id) {
     auto it = std::find_if(entries_.begin(), entries_.end(),
                            [id](const OverlayEntry& e) { return e.id == id; });
-    if (it != entries_.end()) {
-        if (it->config.on_dismiss) {
-            it->config.on_dismiss(it->config.dismiss_user_data);
-        }
-        entries_.erase(it);
+    if (it == entries_.end()) {
+        return;
+    }
+
+    DismissCallbackFn on_dismiss = it->config.on_dismiss;
+    void* dismiss_user_data = it->config.dismiss_user_data;
+
+    entries_.erase(it);
+
+    if (on_dismiss) {
+        on_dismiss(dismiss_user_data);
     }
 }
 
 void OverlayManager::dismiss_top_modal() {
     for (auto it = entries_.rbegin(); it != entries_.rend(); ++it) {
         if (it->active && it->config.modal && it->config.barrier_dismissible) {
-            if (it->config.on_dismiss) {
-                it->config.on_dismiss(it->config.dismiss_user_data);
-            }
-            // Convert reverse iterator to base iterator for erasure
-            auto base_it = std::next(it).base();
-            entries_.erase(base_it);
+            OverlayId id = it->id;
+            hide_overlay(id);
             return;
         }
     }
 }
 
 void OverlayManager::dismiss_all() {
-    for (auto& entry : entries_) {
-        if (entry.config.on_dismiss) {
-            entry.config.on_dismiss(entry.config.dismiss_user_data);
-        }
+    while (!entries_.empty()) {
+        OverlayId id = entries_.back().id;
+        hide_overlay(id);
     }
-    entries_.clear();
 }
 
 bool OverlayManager::has_active_overlays() const noexcept {
@@ -135,7 +116,7 @@ void OverlayManager::layout_overlays(core::NodeTree& tree, core::Size viewport_s
         } else if (entry.anchor_node.is_valid()) {
             const auto* an = tree.get(entry.anchor_node);
             if (an) {
-                core::Point gpos = get_global_offset(tree, entry.anchor_node);
+                core::Point gpos = tree.global_offset(entry.anchor_node);
                 anchor_rect =
                     core::Rect{gpos.x, gpos.y, an->layout.size.width, an->layout.size.height};
             }

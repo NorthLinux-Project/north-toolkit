@@ -13,6 +13,21 @@ class OverlayManager;
 
 namespace north::event {
 
+using AcceleratorCallbackFn = void (*)(void* user_data);
+
+struct KeyShortcut {
+    uint32_t key_code{0};
+    uint32_t modifiers{0};
+
+    [[nodiscard]] constexpr bool operator==(const KeyShortcut& other) const noexcept = default;
+};
+
+struct AcceleratorEntry {
+    KeyShortcut shortcut;
+    AcceleratorCallbackFn callback{nullptr};
+    void* user_data{nullptr};
+};
+
 class InputDispatcher : public platform::IWindowListener {
 public:
     explicit InputDispatcher(core::NodeTree& tree) noexcept;
@@ -51,6 +66,10 @@ public:
         fallback_listener_ = listener;
     }
 
+    void register_accelerator(KeyShortcut shortcut, AcceleratorCallbackFn callback, void* user_data = nullptr);
+    void unregister_accelerator(KeyShortcut shortcut);
+    void clear_accelerators();
+
     [[nodiscard]] core::Handle<core::Node> hovered_node() const noexcept { return hovered_node_; }
     [[nodiscard]] core::Handle<core::Node> pressed_node() const noexcept { return pressed_node_; }
 
@@ -62,6 +81,7 @@ private:
     void update_ime_window_position();
 
     core::NodeTree& tree_;
+    std::vector<AcceleratorEntry> accelerators_;
     core::Handle<core::Node> hovered_node_{};
     core::Handle<core::Node> pressed_node_{};
     core::Handle<core::Node> focused_node_{};

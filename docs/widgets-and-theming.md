@@ -43,7 +43,15 @@ Theme dark_theme = Theme::make_dark(seed);
 
 ---
 
-## 2. Declarative Widget Catalog
+## 2. Declarative Widget Catalog & Modular Data Architecture
+
+Widget state structures are partitioned into six cohesive headers under [`src/north/widget/data/`](../src/north/widget/data/) and aggregated via [`widget_data.hpp`](../src/north/widget/widget_data.hpp):
+- [`core_data.hpp`](../src/north/widget/data/core_data.hpp): `WidgetKind`, `BoxData`, `TextData`, `IconData`, `ImageData`.
+- [`form_data.hpp`](../src/north/widget/data/form_data.hpp): `ButtonData`, `TextInputData`, `TextAreaData`, `CheckboxData`, `SwitchData`, `SliderData`, `RadioButtonData`.
+- [`scroll_data.hpp`](../src/north/widget/data/scroll_data.hpp): `ScrollAreaData`, `VirtualListData`, `ScrollbarStyle`.
+- [`nav_data.hpp`](../src/north/widget/data/nav_data.hpp): `TabBarData`, `TabsViewData`, `SegmentedButtonData`, `AccordionData`.
+- [`data_views.hpp`](../src/north/widget/data/data_views.hpp): `SplitViewData`, `TreeViewData`, `DataTableData`.
+- [`picker_data.hpp`](../src/north/widget/data/picker_data.hpp): `CommandPaletteData`, `SelectData`, `ComboBoxData`.
 
 All widgets use builder structs adhering to fluent value semantics:
 
@@ -57,10 +65,21 @@ All widgets use builder structs adhering to fluent value semantics:
 | **Slider** | `SliderBuilder` | Continuous/discrete slider bar supporting min/max range mapping and drag gestures. |
 | **Text** | `TextBuilder` | Static/reactive typography with font family, size, weight, and color styling. |
 | **TextInput** | `TextInputBuilder` | Single-line editable text input supporting caret navigation, selection, and IME composition. |
-| **ScrollArea** | `ScrollAreaBuilder` | Scrollable viewport with momentum scrolling and dynamic scrollbars. |
+| **TextArea** | `TextAreaBuilder` | Multiline text editor with line-number gutter, 2D cursor navigation, selection, and undo/redo. |
+| **ScrollArea** | `ScrollAreaBuilder` | Scrollable viewport with spring-physics scrolling and dynamic scrollbars. |
 | **VirtualList** | `VirtualListBuilder` | High-performance virtualized list rendering only visible items in large datasets. |
 | **Icon** | `IconBuilder` | Declarative SVG vector icon renderer with theme tinting and sizing. |
 | **Image** | `ImageBuilder` | WIC-decoded image view with `Fit`, `Cover`, `Fill`, `None`, and `ScaleDown` scaling and SDF rounded corners. |
+| **TabBar / TabsView** | `TabBarBuilder`, `TabsViewBuilder` | Animated indicator tabs with icons, badges, close buttons, drag-reordering, and `KeepAlive`/`Lazy` views. |
+| **SegmentedButton** | `SegmentedButtonBuilder` | Single- or multi-select pill toggle group with animated selection indicator. |
+| **Accordion** | `AccordionBuilder` | Collapsible disclosure panels with rotating chevrons and height tweening. |
+| **SplitView** | `SplitViewBuilder` | Resizable horizontal/vertical two-pane container with `Ratio`, `FixedFirst`, and `FixedSecond` modes. |
+| **TreeView** | `TreeViewBuilder` | Virtualized hierarchical tree with indent guides, expandable nodes, SVG icons, and keyboard navigation. |
+| **DataTable** | `DataTableBuilder` | Sticky-header multi-column table with interactive column resizing, tri-state sorting, and row virtualization. |
+| **CommandPalette** | `CommandPaletteBuilder` | Modal quick-open palette with prefix modes (`>`, `@`, `#`), fuzzy filtering, and match highlighting. |
+| **Select** | `SelectBuilder` | Overlay-anchored dropdown selector with keyboard and mouse navigation. |
+| **ComboBox** | `ComboBoxBuilder` | Editable text field with real-time fuzzy-filtered dropdown popup. |
+| **Dialog / Menu / Popover / Tooltip** | `DialogBuilder`, `MenuBuilder`, `PopoverBuilder`, `TooltipBuilder` | Modal and non-modal overlays with automatic `on_dismiss` node and callback cleanup. |
 
 ---
 
@@ -92,10 +111,11 @@ When positioning an overlay against an anchor element:
 - If the overlay extends past the right viewport edge, it automatically flips to `Placement::LeftCenter`.
 - Finally, coordinates are clamped within the active window boundaries, preventing offscreen clipping.
 
-### Modal Event Interception
-Modal overlays (such as `Dialog` and `Menu`) absorb outside pointer events:
-- Clicking outside the overlay bounds triggers the dismiss callback.
-- Pressing the Escape key automatically closes the topmost active modal overlay.
+### Modal Event Interception & Deterministic Cleanup
+Modal overlays (such as `Dialog`, `Menu`, `CommandPalette`, `Select`, and `ComboBox`) absorb outside pointer events:
+- Clicking outside the overlay bounds or pressing the Escape key triggers `OverlayManager::dismiss_top_modal()`.
+- `OverlayManager::hide_overlay` removes the active entry prior to invoking `OverlayConfig::on_dismiss`, preventing re-entrancy hazards.
+- Ephemeral overlay nodes and action callback wrappers are bound to `on_dismiss` contexts so nodes and heap state are deterministically freed regardless of how the overlay is closed.
 
 ---
 

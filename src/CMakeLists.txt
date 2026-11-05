@@ -23,6 +23,8 @@ add_library(north STATIC
     north/text/glyph_atlas.cpp
     north/text/paragraph.cpp
     north/text/text_buffer.cpp
+    north/text/text_editor.cpp
+    north/platform/clipboard.cpp
     north/platform/win32/win32_window.cpp
     north/platform/win32/win32_app.cpp
     north/color/hct.cpp
@@ -32,12 +34,16 @@ add_library(north STATIC
     north/image/image_cache.cpp
     north/style/theme.cpp
     north/event/input_dispatcher.cpp
+    north/event/input_pointer.cpp
+    north/event/input_keyboard.cpp
+    north/event/input_scroll.cpp
     north/animation/curve.cpp
     north/animation/animation_manager.cpp
     north/widget/box.cpp
     north/widget/text.cpp
     north/widget/button.cpp
     north/widget/text_input.cpp
+    north/widget/text_area.cpp
     north/widget/scroll_area.cpp
     north/widget/virtual_list.cpp
     north/widget/checkbox.cpp
@@ -52,6 +58,16 @@ add_library(north STATIC
     north/widget/menu.cpp
     north/widget/tooltip.cpp
     north/widget/popover.cpp
+    north/widget/tabs.cpp
+    north/widget/segmented_button.cpp
+    north/widget/accordion.cpp
+    north/widget/split_view.cpp
+    north/widget/tree_view.cpp
+    north/widget/data_table.cpp
+    north/text/fuzzy_matcher.cpp
+    north/widget/command_palette.cpp
+    north/widget/select.cpp
+    north/widget/combo_box.cpp
 )
 
 target_include_directories(north PUBLIC

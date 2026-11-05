@@ -33,6 +33,7 @@ public:
     [[nodiscard]] PaintFn default_paint() const noexcept { return default_paint_fn_; }
 
     [[nodiscard]] size_t node_count() const noexcept;
+    [[nodiscard]] Point global_offset(Node::HandleType handle) const noexcept;
 
 private:
     SlabPool<Node, 64> pool_;

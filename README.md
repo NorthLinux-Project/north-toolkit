@@ -11,7 +11,8 @@ North Toolkit is a high-performance, GPU-accelerated, cross-platform UI toolkit 
 - **Analytic GPU Shaders**: Bufferless quad rendering via `SV_VertexID` in HLSL evaluating exact signed distance fields (SDF) for rounded rects, inner borders, and Evan Wallace rational erf Gaussian box shadows. Textured quads feature bilinear sampling and subpixel SDF corner clipping.
 - **Comprehensive Text Pipeline**: Industrial-grade typographic stack integrating HarfBuzz (shaping), FreeType (rasterization), SheenBidi (bidi reordering), libunibreak (line and grapheme breaking), and DirectWrite system font fallback. Rendered via a dynamic R8 skyline shelf atlas with 4-bin horizontal subpixel positioning.
 - **Material 3 CAM16 HCT Perceptual Color Model**: Exact bisection gamut mapping ensuring mathematically guaranteed contrast across light and dark seed-generated tonal palettes.
-- **Declarative Builder Ergonomics**: Flat, composable widget builders with reactive push-dirty/pull-cached signals and nine-point anchor positioning.
+- **Workstation-Grade Widget & Navigation Catalog**: Includes `SplitView`, virtualized `TreeView` and `DataTable`, multiline `TextArea` with undo/redo and system clipboard, `TabBar`/`TabsView`, `SegmentedButton`, `Accordion`, `Select`, `ComboBox`, and fuzzy-matched `CommandPalette` with global keyboard accelerators.
+- **Declarative Builder Ergonomics**: Flat, composable widget builders with reactive push-dirty/pull-cached signals, modular widget data domains (`src/north/widget/data/`), and nine-point anchor positioning.
 
 ---
 

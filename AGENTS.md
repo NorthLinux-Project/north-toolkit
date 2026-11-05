@@ -76,8 +76,9 @@ Platform Shell (north::platform::win32::Win32App, Win32Window, Per-Monitor V2 DP
 ### Reactive State & Node Hierarchy
 - **Signals (`north::core::Signal<T>`)**: Encapsulates state values and notifies registered dirty observers. Uses Small Buffer Optimization (SBO) for up to 2 inline observers. Callbacks use raw function pointers and `void*` context to avoid `std::function` allocation overhead.
 - **Computed Values (`north::core::Computed<T>`)**: Push-dirty, pull-cached derived signals.
-- **Retained Node Tree (`north::core::NodeTree`)**: Manages parent-child hierarchies of `Node` instances stored in `SlabPool<Node>`. Uses bitmask dirty flags (`kLayout`, `kPaint`, `kTransform`, `kChildren`, `kAll`) that bubble upward to the root, allowing layout and paint passes to skip clean subtrees.
+- **Retained Node Tree (`north::core::NodeTree`)**: Manages parent-child hierarchies of `Node` instances stored in `SlabPool<Node>`. Uses bitmask dirty flags (`kLayout`, `kPaint`, `kTransform`, `kChildren`, `kAll`) that bubble upward to the root, allowing layout and paint passes to skip clean subtrees. Provides `global_offset(Handle<Node>)` for resolving screen-space node origins.
 - **Node Protocols**: Node behaviors are defined via raw function pointers (`LayoutFn`, `PaintFn`, `HitTestFn`).
+- **Modular Widget State (`src/north/widget/data/`)**: Widget payload structures are partitioned by domain (`core_data.hpp`, `form_data.hpp`, `scroll_data.hpp`, `nav_data.hpp`, `data_views.hpp`, `picker_data.hpp`) and aggregated via `widget_data.hpp`.
 
 ### Layout Engine
 - **Constraints (`north::layout::BoxConstraints`)**: Min/max width and height bounds. Supports `loosen`, `tighten`, and `constrain`.
@@ -91,6 +92,7 @@ Platform Shell (north::platform::win32::Win32App, Win32Window, Per-Monitor V2 DP
 
 ### Overlay Subsystem
 - **Overlay Management (`north::overlay::OverlayManager`)**: Root-attached overlay layer hosting `Dialog`, `Menu`, `Popover`, and `Tooltip` widgets outside normal parent clipping boundaries.
+- **Deterministic Dismissal & Node Lifecycle**: Ephemeral overlay nodes and action callback wrappers are bound to `OverlayConfig::on_dismiss` contexts, ensuring zero heap leaks or orphaned nodes when dismissed via barrier click, Escape key, or `hide_overlay`.
 - **Placement & Collision Detection**: Viewport-aware nine-point anchor positioning with automatic viewport collision flipping (bottom $\leftrightarrow$ top, right $\leftrightarrow$ left) and edge clamping.
 - **Event Interception**: Modal overlays absorb outside pointer events, dismiss on outside click, and handle Escape key navigation.
 
@@ -98,6 +100,28 @@ Platform Shell (north::platform::win32::Win32App, Win32Window, Per-Monitor V2 DP
 - **WIC Image Decoder (`north::image::ImageDecoder`)**: Zero-dependency decoding for PNG, JPEG, BMP, and ICO via Windows Imaging Component.
 - **Texture Cache (`north::image::ImageCache`)**: Centralized deduplication cache returning reusable GPU `TextureId` handles.
 - **Image Widget (`north::widget::ImageBuilder`)**: Declarative image viewing supporting `Fit`, `Cover`, `Fill`, `None`, and `ScaleDown` content scaling, 9-point alignment, and hardware-accelerated SDF corner clipping and borders via `image.hlsl` and `ImageBatcher`.
+
+### Multiline Text Editor & Clipboard Subsystem
+- **Text Editor Engine (`north::text::TextEditor`)**: Headless 2D cursor navigation (Up/Down preserving preferred column memory across unequal lines, Left/Right/Home/End/Word), multiline selection, UTF-8 codepoint boundary tracking, and typing-coalesced undo/redo history.
+- **System Clipboard (`north::platform::Clipboard`)**: Win32 `CF_UNICODETEXT` clipboard abstraction with UTF-8 $\leftrightarrow$ UTF-16 conversion.
+- **Text Area Widget (`north::widget::TextAreaBuilder`)**: Declarative multiline editor supporting optional line-number gutter, soft wrapping, caret blinking, selection highlighting, and inline IME composition.
+
+### Tabs & Navigation Subsystem
+- **Tabs & Tab Container (`north::widget::TabBarBuilder`, `north::widget::TabsViewBuilder`)**: Workstation tab bar with animated sliding indicator pills/lines, per-tab SVG icons, badges, close buttons, overflow scrolling, fluid drag-reordering, and hybrid `KeepAlive`/`Lazy` view retention.
+- **Segmented Button (`north::widget::SegmentedButtonBuilder`)**: Compact pill toggle group supporting single- and multi-select modes with animated selection pill transitions.
+- **Accordion & Disclosure (`north::widget::AccordionBuilder`)**: Collapsible panels supporting exclusive accordion or multi-expanded modes, animated chevron rotation, and smooth height tweening.
+
+### SplitPane, TreeView & DataTable Subsystem
+- **Split View (`north::widget::SplitViewBuilder`)**: Resizable two-pane container supporting horizontal and vertical orientations, `Ratio`, `FixedFirst`, and `FixedSecond` sizing modes, min/max bounds clamping, draggable sash with visual grip, and double-click reset.
+- **Tree View (`north::widget::TreeViewBuilder`)**: Virtualized hierarchical tree widget with flattened visible-row projection, indent guide lines, rotating chevrons, SVG icons, and keyboard navigation.
+- **Data Table (`north::widget::DataTableBuilder`)**: Multi-column tabular view with sticky header, flex-weighted columns, interactive column resizing, tri-state sorting (`None`, `Ascending`, `Descending`), alternating row striping, and virtualized rows.
+
+### Command Palette, ComboBox & Select Subsystem
+- **Fuzzy Matcher (`north::text::fuzzy_match`)**: Subsequence string matching with prefix, word-boundary (spaces, hyphens, underscores, dots, camelCase), and consecutive character bonuses, producing ranked match scores and matched character index ranges.
+- **Command Palette (`north::widget::CommandPaletteBuilder`)**: Workstation modal quick-open dialog anchored top-center with category sections, prefix mode switching (`>`, `@`, `#`), live fuzzy query filtering, character match highlights, shortcut badges, and keyboard navigation.
+- **Select Dropdown (`north::widget::SelectBuilder`)**: Overlay-anchored dropdown picker displaying selected option label, icons, and right-aligned chevrons with keyboard and mouse selection.
+- **Combo Box (`north::widget::ComboBoxBuilder`)**: Editable text field with trailing dropdown chevron and real-time attached overlay list filtered via fuzzy matching.
+- **Global Accelerators & Modular Event Dispatch (`north::event::InputDispatcher`)**: Keyboard accelerator table for registering global key combos (e.g. `Ctrl+Shift+P`, `Ctrl+P`) with focus trapping and modal routing. Event handling is partitioned across `input_dispatcher.cpp` (hit-testing, focus, IME, accelerators), `input_pointer.cpp`, `input_keyboard.cpp`, and `input_scroll.cpp`.
 
 ### GPU & Rendering Pipeline
 - **Device Abstraction (`north::gpu::Device`)**: API-agnostic hardware interface operating on lightweight handles (`TextureId`, `BufferId`, `PipelineId`).

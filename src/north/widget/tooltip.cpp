@@ -74,6 +74,15 @@ overlay::OverlayId show_tooltip(core::NodeTree& tree, overlay::OverlayManager& m
 
     auto badge = badge_builder.build();
 
+    struct TooltipDismissContext {
+        core::NodeTree* tree{nullptr};
+        core::Handle<core::Node> badge_node{};
+    };
+    auto* ctx = new TooltipDismissContext{
+        .tree = &tree,
+        .badge_node = badge,
+    };
+
     overlay::OverlayConfig cfg{
         .placement = placement,
         .offset = 6.0f,
@@ -82,6 +91,15 @@ overlay::OverlayId show_tooltip(core::NodeTree& tree, overlay::OverlayManager& m
         .modal = false,
         .barrier_dismissible = false,
         .barrier_color = core::Color{0.0f, 0.0f, 0.0f, 0.0f},
+        .on_dismiss =
+            [](void* ud) {
+                auto* t_ctx = static_cast<TooltipDismissContext*>(ud);
+                if (t_ctx->tree && t_ctx->badge_node.is_valid()) {
+                    t_ctx->tree->destroy_node(t_ctx->badge_node);
+                }
+                delete t_ctx;
+            },
+        .dismiss_user_data = ctx,
     };
 
     return mgr.show_overlay(badge, cfg, anchor);

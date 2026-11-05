@@ -4,6 +4,8 @@
 #include "north/widget/button.hpp"
 #include "north/widget/text.hpp"
 
+#include <memory>
+
 namespace north::widget {
 
 DialogBuilder::DialogBuilder(core::NodeTree& tree, overlay::OverlayManager& mgr)
@@ -54,17 +56,35 @@ overlay::OverlayId DialogBuilder::show() {
     return show_dialog(tree_, mgr_, config_);
 }
 
+namespace {
+
+struct DialogDismissContext;
+
 struct DialogActionWrapper {
     DialogActionFn user_callback{nullptr};
     void* user_data{nullptr};
-    overlay::OverlayManager* mgr{nullptr};
-    overlay::OverlayId overlay_id{overlay::kInvalidOverlayId};
+    DialogDismissContext* ctx{nullptr};
 };
+
+struct DialogDismissContext {
+    core::NodeTree* tree{nullptr};
+    overlay::OverlayManager* mgr{nullptr};
+    core::Handle<core::Node> card_node{};
+    overlay::OverlayId overlay_id{overlay::kInvalidOverlayId};
+    std::vector<std::unique_ptr<DialogActionWrapper>> wrappers;
+};
+
+} // namespace
 
 overlay::OverlayId show_dialog(core::NodeTree& tree, overlay::OverlayManager& mgr,
                                const DialogConfig& config) {
     const auto& th = config.theme_signal ? config.theme_signal->get() : config.theme;
     const auto& c = th.colors();
+
+    auto* ctx = new DialogDismissContext{
+        .tree = &tree,
+        .mgr = &mgr,
+    };
 
     std::vector<core::Handle<core::Node>> children;
 
@@ -98,12 +118,13 @@ overlay::OverlayId show_dialog(core::NodeTree& tree, overlay::OverlayManager& mg
     if (!config.actions.empty()) {
         std::vector<core::Handle<core::Node>> button_handles;
         for (const auto& act : config.actions) {
-            auto* wrapper = new DialogActionWrapper{
+            auto wrapper = std::make_unique<DialogActionWrapper>(DialogActionWrapper{
                 .user_callback = act.on_click,
                 .user_data = act.user_data,
-                .mgr = &mgr,
-                .overlay_id = overlay::kInvalidOverlayId,
-            };
+                .ctx = ctx,
+            });
+            DialogActionWrapper* raw_wrapper = wrapper.get();
+            ctx->wrappers.push_back(std::move(wrapper));
 
             auto btn_builder = ButtonBuilder(tree, act.label)
                                    .theme(th)
@@ -136,15 +157,19 @@ overlay::OverlayId show_dialog(core::NodeTree& tree, overlay::OverlayManager& mg
             btn_builder.on_click(
                 [](void* ud) {
                     auto* w = static_cast<DialogActionWrapper*>(ud);
-                    if (w->user_callback) {
-                        w->user_callback(w->user_data);
+                    DialogActionFn cb = w->user_callback;
+                    void* cb_ud = w->user_data;
+                    overlay::OverlayManager* m = w->ctx ? w->ctx->mgr : nullptr;
+                    overlay::OverlayId oid =
+                        w->ctx ? w->ctx->overlay_id : overlay::kInvalidOverlayId;
+                    if (cb) {
+                        cb(cb_ud);
                     }
-                    if (w->mgr && w->overlay_id != overlay::kInvalidOverlayId) {
-                        w->mgr->hide_overlay(w->overlay_id);
+                    if (m && oid != overlay::kInvalidOverlayId) {
+                        m->hide_overlay(oid);
                     }
-                    delete w;
                 },
-                wrapper);
+                raw_wrapper);
 
             button_handles.push_back(btn_builder.build());
         }
@@ -178,6 +203,7 @@ overlay::OverlayId show_dialog(core::NodeTree& tree, overlay::OverlayManager& mg
     }
 
     auto dialog_card = card_builder.build();
+    ctx->card_node = dialog_card;
 
     overlay::OverlayConfig o_cfg{
         .placement = overlay::Placement::Auto,
@@ -185,31 +211,19 @@ overlay::OverlayId show_dialog(core::NodeTree& tree, overlay::OverlayManager& mg
         .barrier_dismissible = config.barrier_dismissible,
         .barrier_color = th.is_dark() ? core::Color{0.0f, 0.0f, 0.0f, 0.5f}
                                       : core::Color{0.0f, 0.0f, 0.0f, 0.35f},
+        .on_dismiss =
+            [](void* ud) {
+                auto* d_ctx = static_cast<DialogDismissContext*>(ud);
+                if (d_ctx->tree && d_ctx->card_node.is_valid()) {
+                    d_ctx->tree->destroy_node(d_ctx->card_node);
+                }
+                delete d_ctx;
+            },
+        .dismiss_user_data = ctx,
     };
 
     overlay::OverlayId id = mgr.show_overlay(dialog_card, o_cfg);
-
-    // Update wrapper overlay_id if actions row exists
-    if (!config.actions.empty()) {
-        auto* card_node = tree.get(dialog_card);
-        if (card_node && !card_node->children.empty()) {
-            auto actions_handle = card_node->children.back();
-            auto* actions_node = tree.get(actions_handle);
-            if (actions_node) {
-                for (auto btn_h : actions_node->children) {
-                    auto* btn_n = tree.get(btn_h);
-                    if (btn_n && btn_n->user_data) {
-                        auto* b_data = reinterpret_cast<ButtonData*>(btn_n->user_data);
-                        if (b_data->click_user_data) {
-                            auto* w = static_cast<DialogActionWrapper*>(b_data->click_user_data);
-                            w->overlay_id = id;
-                        }
-                    }
-                }
-            }
-        }
-    }
-
+    ctx->overlay_id = id;
     return id;
 }
 

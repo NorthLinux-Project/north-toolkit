@@ -44,6 +44,10 @@ set(UNIT_TEST_SOURCES
     unit/test_path.cpp
     unit/test_overlay.cpp
     unit/test_image.cpp
+    unit/test_text_editor.cpp
+    unit/test_tabs_and_navigation.cpp
+    unit/test_split_tree_table.cpp
+    unit/test_command_palette_and_pickers.cpp
 )
 
 add_executable(unit_tests ${UNIT_TEST_SOURCES})

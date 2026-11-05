@@ -204,4 +204,19 @@ size_t NodeTree::node_count() const noexcept {
     return pool_.size();
 }
 
+Point NodeTree::global_offset(Node::HandleType handle) const noexcept {
+    Point pt{0.0f, 0.0f};
+    Node::HandleType cur = handle;
+    while (cur.is_valid()) {
+        const Node* n = pool_.get(cur);
+        if (!n) {
+            break;
+        }
+        pt.x += n->layout.offset.x;
+        pt.y += n->layout.offset.y;
+        cur = n->parent;
+    }
+    return pt;
+}
+
 } // namespace north::core
